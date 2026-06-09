@@ -26,5 +26,13 @@ class R2Storage:
         url = f'{self.public_base}/{key}' if self.public_base else self.presigned_get_url(key)
         return {'storage_key': key, 'url': url, 'content_type': ct}
 
-    def presigned_get_url(self, key:str, expires:int=3600) -> str:
+    def put_analyze_file(self, *, analysis_type:str, filename:str, content:bytes, content_type:Optional[str]=None) -> dict:
+        if not self.enabled:
+            raise RuntimeError('Cloudflare R2 variables are missing.')
+        safe = filename.replace('/','_').replace('\\','_')
+        key = f'analyze/{analysis_type}/{uuid.uuid4().hex}-{safe}'
+        ct = content_type or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        self.client.put_object(Bucket=self.bucket, Key=key, Body=content, ContentType=ct)
+        url = f'{self.public_base}/{key}' if self.public_base else self.presigned_get_url(key)
+        return {'storage_key': key, 'url': url, 'content_type': ct}
         return self.client.generate_presigned_url('get_object', Params={'Bucket': self.bucket, 'Key': key}, ExpiresIn=expires)

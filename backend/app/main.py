@@ -586,32 +586,99 @@ def delete_pattern(pattern_id: int):
         conn.commit()
         return {'deleted': pattern_id}
 
-# ── Personal Trading AI: Standalone Analysis ─────────
+# ── Personal Trading AI: Saved Analysis Sessions ─────
+
+def _serialize_similar(similar_days: list) -> list:
+    """Normalize similar day rows for JSON storage and API responses."""
+    return [{
+        'day_id': d.get('day_id') or d.get('id'),
+        'trade_date': str(d.get('trade_date', '')),
+        'title': d.get('title', ''),
+        'tickers': d.get('tickers', ''),
+        'pnl': d.get('pnl'),
+        'ai_summary': d.get('ai_summary', ''),
+        'ai_pattern_tags': d.get('ai_pattern_tags', ''),
+        'execution_score': d.get('execution_score'),
+        'lessons': d.get('lessons', ''),
+        'biggest_mistake': d.get('biggest_mistake', ''),
+        'similarity': float(d.get('similarity', 0)),
+    } for d in similar_days]
+
 
 @app.post('/analyze')
-async def analyze_premarket(file: UploadFile = File(...)):
-    """Upload a premarket screenshot without creating a day.
-    Returns chart analysis, similar days, aggregated stats, and a recommendation.
-    Each step is wrapped so partial results return even if a later step fails."""
+async def analyze_screenshot(
+    file: UploadFile = File(...),
+    analysis_type: str = Form('premarket'),
+    trade_date: str = Form(None),
+    day_id: int = Form(None),
+    notes: str = Form(''),
+    save_session: bool = Form(True),
+):
+    """Upload any chart screenshot for AI analysis.
+    - analysis_type: premarket | postmarket | trade | other
+    - trade_date: ISO date string to link to a trading day (auto-resolves day_id)
+    - day_id: explicit trading day FK (overrides trade_date resolution)
+    - notes: freeform notes to attach to the session
+    - save_session: set False to skip saving (one-off queries)
+    """
     if not has_ai():
         raise HTTPException(503, 'AI is not configured. Set OPENAI_API_KEY.')
+
+    valid_types = ('premarket', 'postmarket', 'trade', 'other')
+    if analysis_type not in valid_types:
+        raise HTTPException(400, f'analysis_type must be one of: {valid_types}')
 
     content = await file.read()
     if not content:
         raise HTTPException(400, 'Empty file')
 
-    chart_analysis = {}
-    similar_days = []
-    stats = {}
-    recommendation = {}
-
-    # Step 1: Analyze the chart
+    # ── Resolve day_id / trade_date ──────────────────
+    resolved_day_id = day_id
+    resolved_trade_date = trade_date
     try:
-        chart_analysis = analyze_chart_image_bytes(content, 'premarket', file.content_type or 'image/png')
+        with get_conn() as conn, conn.cursor() as cur:
+            if not resolved_day_id and resolved_trade_date:
+                cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (resolved_trade_date,))
+                row = cur.fetchone()
+                if row:
+                    resolved_day_id = row['id']
+            elif resolved_day_id and not resolved_trade_date:
+                cur.execute('SELECT trade_date FROM trading_days WHERE id=%s', (resolved_day_id,))
+                row = cur.fetchone()
+                if row:
+                    resolved_trade_date = str(row['trade_date'])
+    except Exception:
+        pass
+
+    chart_analysis: dict = {}
+    similar_days_raw: list = []
+    stats: dict = {}
+    recommendation: dict = {}
+    stored_url = ''
+    stored_key = ''
+
+    # ── Step 1: Store file ───────────────────────────
+    if save_session and storage.enabled:
+        try:
+            stored = storage.put_analyze_file(
+                analysis_type=analysis_type,
+                filename=file.filename or 'screenshot.png',
+                content=content,
+                content_type=file.content_type or 'image/png',
+            )
+            stored_url = stored['url']
+            stored_key = stored['storage_key']
+        except Exception:
+            pass
+
+    # ── Step 2: Chart AI analysis ────────────────────
+    try:
+        chart_analysis = analyze_chart_image_bytes(content, analysis_type, file.content_type or 'image/png')
     except Exception as e:
         chart_analysis = {'error': f'Chart analysis failed: {e}'}
 
-    # Step 2-4: Embed, find similar, aggregate stats
+    # ── Step 3: Embed + find similar days ────────────
+    emb = None
     try:
         analysis_text = json.dumps(chart_analysis, default=str)
         emb = embed_text(analysis_text)
@@ -622,9 +689,9 @@ async def analyze_premarket(file: UploadFile = File(...)):
                     FROM ai_embeddings e JOIN trading_days d ON d.id = e.day_id
                     GROUP BY e.day_id, d.id
                     ORDER BY similarity DESC LIMIT 15''', (emb,))
-                similar_days = cur.fetchall()
-                if similar_days:
-                    day_ids = [d['id'] for d in similar_days]
+                similar_days_raw = cur.fetchall()
+                if similar_days_raw:
+                    day_ids = [d['id'] for d in similar_days_raw]
                     cur.execute('''SELECT COUNT(*) as total, AVG(pnl) as avg_pnl, SUM(pnl) as total_pnl,
                         AVG(execution_score) as avg_score,
                         SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
@@ -639,29 +706,154 @@ async def analyze_premarket(file: UploadFile = File(...)):
     except Exception as e:
         stats['error'] = f'Similar day search failed: {e}'
 
-    # Step 5: Generate recommendation (skip if no similar days to save time)
+    similar_days_serialized = _serialize_similar(similar_days_raw)
+
+    # ── Step 4: Recommendation ───────────────────────
     try:
-        if similar_days:
-            recommendation = generate_recommendation(chart_analysis, similar_days)
+        if similar_days_raw:
+            recommendation = generate_recommendation(chart_analysis, similar_days_raw)
         else:
-            recommendation = {'recommendation': 'No historical data to compare against yet. Log some trading days first, then this will show personalized recommendations.', 'times_seen': 0}
+            recommendation = {
+                'recommendation': 'No historical data to compare against yet. Log some trading days first.',
+                'times_seen': 0,
+            }
     except Exception as e:
-        recommendation = {'recommendation': f'Recommendation generation failed: {e}', 'times_seen': len(similar_days)}
+        recommendation = {'recommendation': f'Recommendation failed: {e}', 'times_seen': len(similar_days_raw)}
+
+    # ── Step 5: If premarket linked to a day, push fields + embedding ──
+    if resolved_day_id and analysis_type == 'premarket' and chart_analysis.get('gap_direction'):
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute('''UPDATE trading_days SET gap_direction=%s, premarket_trend=%s, volume_assessment=%s,
+                    key_levels=%s, likely_scenarios=%s, updated_at=NOW() WHERE id=%s''',
+                    (chart_analysis.get('gap_direction', ''),
+                     chart_analysis.get('premarket_trend', ''),
+                     chart_analysis.get('volume_assessment', ''),
+                     ', '.join(chart_analysis.get('key_levels', [])) if isinstance(chart_analysis.get('key_levels'), list) else str(chart_analysis.get('key_levels', '')),
+                     ', '.join(chart_analysis.get('likely_scenarios', [])) if isinstance(chart_analysis.get('likely_scenarios'), list) else str(chart_analysis.get('likely_scenarios', '')),
+                     resolved_day_id))
+                chart_tags = chart_analysis.get('pattern_tags', [])
+                if chart_tags:
+                    _auto_link_patterns(cur, resolved_day_id, chart_tags, confidence=0.7)
+                if emb:
+                    cur.execute('INSERT INTO ai_embeddings(day_id,embedding_type,content,embedding) VALUES(%s,%s,%s,%s)',
+                        (resolved_day_id, 'premarket', json.dumps(chart_analysis, default=str), emb))
+                    cur.execute('''SELECT e.day_id, d.trade_date, d.title, d.tickers, d.ai_summary, d.tags,
+                        d.pnl, d.ai_pattern_tags, d.execution_score,
+                        MAX(1 - (e.embedding <=> %s::vector)) AS score
+                        FROM ai_embeddings e JOIN trading_days d ON d.id=e.day_id
+                        WHERE e.day_id <> %s
+                        GROUP BY e.day_id,d.trade_date,d.title,d.tickers,d.ai_summary,d.tags,d.pnl,d.ai_pattern_tags,d.execution_score
+                        ORDER BY score DESC LIMIT 5''', (emb, resolved_day_id))
+                    for r in cur.fetchall():
+                        cur.execute('''INSERT INTO similar_day_links(source_day_id,matched_day_id,similarity_score,reason,ai_reason)
+                            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(source_day_id,matched_day_id)
+                            DO UPDATE SET similarity_score=EXCLUDED.similarity_score''',
+                            (resolved_day_id, r['day_id'], float(r['score'] or 0),
+                             'AI vector similarity (analyze session)', Json({'method': 'pgvector cosine distance'})))
+                conn.commit()
+        except Exception:
+            pass
+
+    # ── Step 6: Persist session ──────────────────────
+    session_id = None
+    if save_session:
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute('''INSERT INTO analyze_sessions
+                    (analysis_type, trade_date, day_id, filename, storage_key, url,
+                     chart_analysis, similar_days, stats, recommendation, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id''',
+                    (analysis_type,
+                     resolved_trade_date or None,
+                     resolved_day_id,
+                     file.filename or 'screenshot.png',
+                     stored_key,
+                     stored_url,
+                     Json(chart_analysis),
+                     Json(similar_days_serialized),
+                     Json({k: v for k, v in (stats or {}).items() if k != 'common_patterns'}),
+                     Json(recommendation),
+                     notes or ''))
+                session_id = cur.fetchone()['id']
+                conn.commit()
+        except Exception:
+            pass
 
     return {
+        'session_id': session_id,
+        'analysis_type': analysis_type,
+        'trade_date': resolved_trade_date,
+        'day_id': resolved_day_id,
+        'url': stored_url,
+        'filename': file.filename,
         'chart_analysis': chart_analysis,
-        'similar_days': [{
-            'trade_date': str(d.get('trade_date', '')),
-            'title': d.get('title', ''),
-            'tickers': d.get('tickers', ''),
-            'pnl': d.get('pnl'),
-            'ai_summary': d.get('ai_summary', ''),
-            'ai_pattern_tags': d.get('ai_pattern_tags', ''),
-            'execution_score': d.get('execution_score'),
-            'lessons': d.get('lessons', ''),
-            'biggest_mistake': d.get('biggest_mistake', ''),
-            'similarity': float(d.get('similarity', 0)),
-        } for d in similar_days],
+        'similar_days': similar_days_serialized,
         'stats': stats,
         'recommendation': recommendation,
     }
+
+
+# ── Analysis History ─────────────────────────────────
+
+@app.get('/analyze/history')
+def analyze_history(limit: int = 100, analysis_type: str = ''):
+    """Return saved analysis sessions, newest first."""
+    with get_conn() as conn, conn.cursor() as cur:
+        if analysis_type:
+            cur.execute('''SELECT id, analysis_type, trade_date, day_id, filename, url,
+                chart_analysis, recommendation, notes, created_at
+                FROM analyze_sessions WHERE analysis_type=%s
+                ORDER BY created_at DESC LIMIT %s''', (analysis_type, limit))
+        else:
+            cur.execute('''SELECT id, analysis_type, trade_date, day_id, filename, url,
+                chart_analysis, recommendation, notes, created_at
+                FROM analyze_sessions ORDER BY created_at DESC LIMIT %s''', (limit,))
+        return cur.fetchall()
+
+
+@app.get('/analyze/sessions/{session_id}')
+def get_analyze_session(session_id: int):
+    """Return full detail for a saved analysis session."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('SELECT * FROM analyze_sessions WHERE id=%s', (session_id,))
+        session = cur.fetchone()
+        if not session:
+            raise HTTPException(404, 'Session not found')
+        day = None
+        if session.get('day_id'):
+            cur.execute('SELECT id, trade_date, title, tickers, pnl, ai_summary, execution_score FROM trading_days WHERE id=%s', (session['day_id'],))
+            day = cur.fetchone()
+        return {'session': session, 'day': day}
+
+
+@app.delete('/analyze/sessions/{session_id}')
+def delete_analyze_session(session_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('SELECT id FROM analyze_sessions WHERE id=%s', (session_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, 'Session not found')
+        cur.execute('DELETE FROM analyze_sessions WHERE id=%s', (session_id,))
+        conn.commit()
+        return {'deleted': session_id}
+
+
+@app.patch('/analyze/sessions/{session_id}')
+def update_analyze_session(session_id: int, payload: dict):
+    """Update notes or link a session to a day/date after the fact."""
+    allowed = ['notes', 'trade_date', 'day_id']
+    sets = []
+    vals = {'id': session_id}
+    for k in allowed:
+        if k in payload:
+            sets.append(f'{k}=%({k})s')
+            vals[k] = payload[k]
+    if not sets:
+        raise HTTPException(400, 'Nothing to update')
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE analyze_sessions SET {', '.join(sets)} WHERE id=%(id)s RETURNING *", vals)
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, 'Session not found')
+        conn.commit()
+        return row

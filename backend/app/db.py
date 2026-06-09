@@ -101,8 +101,28 @@ def init_db():
             except Exception:
                 pass
 
+        # ── Analyze sessions ─────────────────────
+        cur.execute('''\
+        CREATE TABLE IF NOT EXISTS analyze_sessions (
+          id SERIAL PRIMARY KEY,
+          analysis_type TEXT NOT NULL DEFAULT 'premarket'
+            CHECK (analysis_type IN ('premarket','postmarket','trade','other')),
+          trade_date DATE DEFAULT NULL,
+          day_id INTEGER REFERENCES trading_days(id) ON DELETE SET NULL,
+          filename TEXT DEFAULT '',
+          storage_key TEXT DEFAULT '',
+          url TEXT DEFAULT '',
+          chart_analysis JSONB DEFAULT '{}'::jsonb,
+          similar_days JSONB DEFAULT '[]'::jsonb,
+          stats JSONB DEFAULT '{}'::jsonb,
+          recommendation JSONB DEFAULT '{}'::jsonb,
+          notes TEXT DEFAULT '',
+          created_at TIMESTAMPTZ DEFAULT NOW()
+        );''')
+
         # ── Indexes ──────────────────────────────
-        cur.execute('CREATE INDEX IF NOT EXISTS idx_days_date ON trading_days(trade_date DESC);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_analyze_date ON analyze_sessions(trade_date DESC);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_analyze_day ON analyze_sessions(day_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_uploads_day ON uploads(day_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_similar_source ON similar_day_links(source_day_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_days_pnl ON trading_days(pnl) WHERE pnl IS NOT NULL;')
