@@ -171,7 +171,10 @@ def calendar_data(year: int = None, month: int = None):
                 WHERE trade_date >= (CURRENT_DATE - INTERVAL '13 months')
                 ORDER BY trade_date ASC
             ''')
-        return cur.fetchall()(q: str = '', limit: int = 200):
+        return cur.fetchall()
+
+@app.get('/days')
+def list_days(q: str = '', limit: int = 200):
     with get_conn() as conn, conn.cursor() as cur:
         if q:
             like = f'%{q}%'
