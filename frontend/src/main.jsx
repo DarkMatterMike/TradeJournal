@@ -205,7 +205,7 @@ function CalendarHeatmap({ calendarData, onDayClick, viewYear, viewMonth, onPrev
   );
 }
 
-
+function App() {
   const [page, setPage] = useState('dashboard');
   const [days, setDays] = useState([]);
   const [stats, setStats] = useState(null);
@@ -227,7 +227,8 @@ function CalendarHeatmap({ calendarData, onDayClick, viewYear, viewMonth, onPrev
   const [calView, setCalView] = useState({ year: new Date().getFullYear(), month: new Date().getMonth() });
 
   // ── Analyze state ─────────────────────────────────
-  const [analyzeTab, setAnalyzeTab] = useState('upload');   // 'upload' | 'history'  const [analyzeResult, setAnalyzeResult] = useState(null);
+  const [analyzeTab, setAnalyzeTab] = useState('upload');   // 'upload' | 'history'
+  const [analyzeResult, setAnalyzeResult] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeConfig, setAnalyzeConfig] = useState({
     analysis_type: 'premarket',
