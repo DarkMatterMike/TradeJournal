@@ -750,7 +750,7 @@ function App() {
 function TradovateSyncPage({ onOpenDay, setStatus }) {
   const [syncStatus, setSyncStatus] = useState(null);
   const [accounts, setAccounts] = useState([]);
-  const [selectedAccount, setSelectedAccount] = useState(null);
+  const [selectedAccount, setSelectedAccount] = useState(null); // full account object
   const [preview, setPreview] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [loading, setLoading] = useState('');
@@ -766,27 +766,30 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     try {
       const accs = await api('/tradovate/accounts');
       setAccounts(accs);
-      if (accs.length === 1) setSelectedAccount(accs[0].id);
+      if (accs.length === 1) setSelectedAccount(accs[0]); // store full object
     } catch (e) { setStatus('Failed: ' + e.message); }
     finally { setLoading(''); }
   };
+
+  const accountLabel = (acc) => acc.name || acc.nickname || acc.accountSpec || `Account ${acc.id}`;
 
   const runPreview = async () => {
     if (!selectedAccount) return;
     setLoading('preview');
     setPreview(null);
-    try { setPreview(await api(`/tradovate/preview/${selectedAccount}`)); }
+    try { setPreview(await api(`/tradovate/preview/${selectedAccount.id}`)); }
     catch (e) { setStatus('Preview failed: ' + e.message); }
     finally { setLoading(''); }
   };
 
   const runSync = async () => {
     if (!selectedAccount) return;
-    if (!confirm(`Import all closed trades from Tradovate account ${selectedAccount} into your journal?`)) return;
+    const label = accountLabel(selectedAccount);
+    if (!confirm(`Import all closed trades from Tradovate account ${label} into your journal?`)) return;
     setLoading('sync');
     setSyncResult(null);
     try {
-      const result = await api(`/tradovate/sync/${selectedAccount}`, { method: 'POST', body: JSON.stringify({}) });
+      const result = await api(`/tradovate/sync/${selectedAccount.id}`, { method: 'POST', body: JSON.stringify({}) });
       setSyncResult(result);
       setStatus(`Sync complete — ${result.imported} imported, ${result.skipped} skipped`);
     } catch (e) { setStatus('Sync failed: ' + e.message); }
@@ -842,9 +845,9 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
       <div className="section__head"><span className="section__title">Account</span></div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {accounts.map(acc => (
-          <button key={acc.id} className={`btn ${selectedAccount === acc.id ? 'btn--primary' : 'btn--ghost'}`}
-            onClick={() => setSelectedAccount(acc.id)}>
-            {acc.name || acc.nickname || `Account ${acc.id}`}
+          <button key={acc.id} className={`btn ${selectedAccount?.id === acc.id ? 'btn--primary' : 'btn--ghost'}`}
+            onClick={() => setSelectedAccount(acc)}>
+            {accountLabel(acc)}
             {acc.accountType && <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 6 }}>{acc.accountType}</span>}
           </button>
         ))}
@@ -868,7 +871,13 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
 
     {/* Preview results */}
     {preview && <div className="section">
-      <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs found</span></div>
+      <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs matched</span></div>
+      {/* Debug info */}
+      <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        <span>Tradovate internal ID sent: <code style={{ color: 'var(--accent)' }}>{preview.account_id_requested}</code></span>
+        <span>Account IDs seen in API response: <code style={{ color: 'var(--accent)' }}>{(preview.account_ids_in_response || []).join(', ') || 'none'}</code></span>
+        <span>Total fill pairs returned by API: <code style={{ color: 'var(--accent)' }}>{preview.total_fill_pairs_returned}</code></span>
+      </div>
       {preview.fill_pair_count === 0
         ? <div className="empty-state" style={{ padding: 20 }}>
             <p>No fill pairs returned. This can happen if:</p>

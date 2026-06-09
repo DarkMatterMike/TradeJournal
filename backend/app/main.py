@@ -948,14 +948,28 @@ def tradovate_preview(account_id: int):
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        fill_pairs = tv.get_fill_pairs(account_id)
+        # Fetch all fill pairs unfiltered so we can see what accountId field looks like
+        all_fill_pairs = tv._get('fillPair/list')
+        if not isinstance(all_fill_pairs, list):
+            all_fill_pairs = []
+
+        # Show distinct accountIds seen, so we can verify the filter is correct
+        seen_account_ids = list({fp.get('accountId') for fp in all_fill_pairs if fp.get('accountId') is not None})
+
+        # Apply the filter for the requested account_id
+        fill_pairs = [fp for fp in all_fill_pairs if fp.get('accountId') == account_id]
+
         contract_ids = [fp['contractId'] for fp in fill_pairs if fp.get('contractId')]
         contracts = tv.get_contracts_by_ids(contract_ids)
         rows = [tv._fill_pair_to_row(fp, contracts) for fp in fill_pairs]
+
         return {
+            'account_id_requested': account_id,
+            'account_ids_in_response': seen_account_ids,
+            'total_fill_pairs_returned': len(all_fill_pairs),
             'fill_pair_count': len(fill_pairs),
             'preview': rows[:50],
-            'raw_sample': fill_pairs[:3],  # First 3 raw for debugging
+            'raw_sample': all_fill_pairs[:3],  # First 3 unfiltered for field inspection
         }
     except Exception as e:
         raise HTTPException(502, f'Preview failed: {e}')
