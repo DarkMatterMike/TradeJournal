@@ -1,4 +1,5 @@
 import csv, io, json, os
+from psycopg.types.json import Json
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +35,7 @@ def create_day(payload:dict):
     if not payload.get('trade_date'): raise HTTPException(400,'trade_date is required')
     fields=['trade_date','title','tickers','strategy','session','market_bias','premarket_notes','trade_notes','ideal_notes','lessons','tags','mood','rule_following_score','custom_fields']
     vals={k:payload.get(k, {} if k=='custom_fields' else None) for k in fields}
+    vals['custom_fields'] = Json(vals.get('custom_fields') or {})
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''INSERT INTO trading_days (trade_date,title,tickers,strategy,session,market_bias,premarket_notes,trade_notes,ideal_notes,lessons,tags,mood,rule_following_score,custom_fields)
         VALUES (%(trade_date)s,COALESCE(%(title)s,''),COALESCE(%(tickers)s,''),COALESCE(%(strategy)s,''),COALESCE(%(session)s,''),COALESCE(%(market_bias)s,''),COALESCE(%(premarket_notes)s,''),COALESCE(%(trade_notes)s,''),COALESCE(%(ideal_notes)s,''),COALESCE(%(lessons)s,''),COALESCE(%(tags)s,''),COALESCE(%(mood)s,''),%(rule_following_score)s,%(custom_fields)s)
@@ -57,7 +59,7 @@ def update_day(day_id:int, payload:dict):
     sets=[]; vals={'id':day_id}
     for k in allowed:
         if k in payload:
-            sets.append(f'{k}=%({k})s'); vals[k]=payload[k]
+            sets.append(f'{k}=%({k})s'); vals[k]=Json(payload[k]) if k in ['custom_fields','ai_market_structure','ai_execution_review'] else payload[k]
     if not sets: return get_day(day_id)['day']
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"UPDATE trading_days SET {', '.join(sets)}, updated_at=NOW() WHERE id=%(id)s RETURNING *", vals)
@@ -80,10 +82,10 @@ async def upload(day_id:int, kind:str=Form(...), file:UploadFile=File(...), run_
         ai_desc=json.dumps(ai_json)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''INSERT INTO uploads(day_id,kind,filename,content_type,storage_key,url,extracted_text,ai_description,ai_json)
-        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',(day_id,kind,file.filename,stored['content_type'],stored['storage_key'],stored['url'],extracted,ai_desc,json.dumps(ai_json)))
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *''',(day_id,kind,file.filename,stored['content_type'],stored['storage_key'],stored['url'],extracted,ai_desc,Json(ai_json or {})))
         up=cur.fetchone()
         if kind=='csv' and extracted.startswith('['):
-            for r in json.loads(extracted): cur.execute('INSERT INTO trade_rows(day_id,row_data) VALUES(%s,%s)',(day_id,json.dumps(r)))
+            for r in json.loads(extracted): cur.execute('INSERT INTO trade_rows(day_id,row_data) VALUES(%s,%s)',(day_id,Json(r)))
         content_for_embedding=' '.join([kind,file.filename,extracted,ai_desc])
         emb=embed_text(content_for_embedding)
         if emb: cur.execute('INSERT INTO ai_embeddings(day_id,upload_id,embedding_type,content,embedding) VALUES(%s,%s,%s,%s,%s)',(day_id,up['id'],kind,content_for_embedding,emb))
@@ -97,7 +99,7 @@ def run_intelligence(day_id:int):
     emb=embed_text(text)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''UPDATE trading_days SET ai_summary=%s, ai_setup_tags=%s, ai_market_structure=%s, ai_execution_review=%s, lessons=CASE WHEN lessons='' THEN %s ELSE lessons END, updated_at=NOW() WHERE id=%s RETURNING *''',(
-            intel.get('summary',''), intel.get('setup_tags',''), json.dumps(intel.get('market_structure',{})), json.dumps(intel.get('execution_review',{})), intel.get('lessons',''), day_id))
+            intel.get('summary',''), intel.get('setup_tags',''), Json(intel.get('market_structure',{})), Json(intel.get('execution_review',{})), intel.get('lessons',''), day_id))
         row=cur.fetchone()
         if emb: cur.execute('INSERT INTO ai_embeddings(day_id,embedding_type,content,embedding) VALUES(%s,%s,%s,%s)',(day_id,'day_intelligence',text,emb))
         conn.commit(); return {'day':row,'intelligence':intel}
@@ -113,7 +115,7 @@ def find_similar(day_id:int, limit:int=10):
         for r in rows:
             cur.execute('''INSERT INTO similar_day_links(source_day_id,matched_day_id,similarity_score,reason,ai_reason)
               VALUES(%s,%s,%s,%s,%s) ON CONFLICT(source_day_id,matched_day_id) DO UPDATE SET similarity_score=EXCLUDED.similarity_score, reason=EXCLUDED.reason, ai_reason=EXCLUDED.ai_reason''',
-              (day_id,r['day_id'],float(r['score'] or 0),'AI vector similarity based on chart/trade/day intelligence.',json.dumps({'method':'pgvector cosine distance'})))
+              (day_id,r['day_id'],float(r['score'] or 0),'AI vector similarity based on chart/trade/day intelligence.',Json({'method':'pgvector cosine distance'})))
         conn.commit(); return rows
 
 @app.post('/similar-links')
@@ -133,7 +135,7 @@ def patterns():
 def create_pattern(payload:dict):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''INSERT INTO playbook_patterns(name,description,rules,tags,custom_fields) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(name) DO UPDATE SET description=EXCLUDED.description,rules=EXCLUDED.rules,tags=EXCLUDED.tags,updated_at=NOW() RETURNING *''',
-        (payload['name'],payload.get('description',''),payload.get('rules',''),payload.get('tags',''),json.dumps(payload.get('custom_fields',{}))))
+        (payload['name'],payload.get('description',''),payload.get('rules',''),payload.get('tags',''),Json(payload.get('custom_fields',{}))))
         row=cur.fetchone(); conn.commit(); return row
 
 @app.post('/days/{day_id}/patterns/{pattern_id}')
