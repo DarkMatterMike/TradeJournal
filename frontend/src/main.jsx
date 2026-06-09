@@ -773,6 +773,16 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
 
   const accountLabel = (acc) => acc.name || acc.nickname || acc.accountSpec || `Account ${acc.id}`;
 
+  const runWsSync = async () => {
+    setLoading('wssync');
+    try {
+      const result = await api('/tradovate/ws-sync', { method: 'POST', body: JSON.stringify({}) });
+      setStatus(`Session loaded — ${result.status}${result.entities?.length ? ' · entities: ' + result.entities.join(', ') : ''}`);
+      await loadStatus();
+    } catch (e) { setStatus('WS sync failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
   const runPreview = async () => {
     if (!selectedAccount) return;
     setLoading('preview');
@@ -856,16 +866,19 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
 
     {/* Actions */}
     {selectedAccount && <div className="section">
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn btn--ghost" onClick={runPreview} disabled={loading === 'preview'}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button className="btn btn--amber" onClick={runWsSync} disabled={!!loading} title="Triggers a WebSocket session sync to load all historical trades into Tradovate's cache before importing">
+          {loading === 'wssync' ? <Loader2 size={13} className="spin" /> : <Activity size={13} />} Load Historical Data
+        </button>
+        <button className="btn btn--ghost" onClick={runPreview} disabled={!!loading}>
           {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview Trades
         </button>
-        <button className="btn btn--primary" onClick={runSync} disabled={loading === 'sync'}>
+        <button className="btn btn--primary" onClick={runSync} disabled={!!loading}>
           {loading === 'sync' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import Now
         </button>
       </div>
       <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
-        Preview shows what would be imported without writing anything. Import is idempotent — re-running it won't create duplicates.
+        <strong style={{ color: 'var(--amber)' }}>First time?</strong> Click <em>Load Historical Data</em> first — this triggers a WebSocket session sync that tells Tradovate to make your full trade history available via the API. Then Preview or Import.
       </p>
     </div>}
 
@@ -920,6 +933,7 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
         <div className="stat-card"><div className="stat-card__label">Errors</div><div className={`stat-card__value ${syncResult.errors?.length ? 'negative' : ''}`}>{syncResult.errors?.length || 0}</div></div>
       </div>
       {syncResult.message && <p style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8 }}>{syncResult.message}</p>}
+      {syncResult.ws_sync && <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>WebSocket sync: {syncResult.ws_sync.status}{syncResult.ws_sync.entities?.length ? ' · ' + syncResult.ws_sync.entities.join(', ') : ''}</p>}
       {syncResult.errors?.length > 0 && <div style={{ marginTop: 12 }}>
         <p style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 6 }}>Errors:</p>
         {syncResult.errors.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--text-3)', padding: '3px 0' }}>{e}</div>)}

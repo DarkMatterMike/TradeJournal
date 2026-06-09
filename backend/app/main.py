@@ -891,25 +891,21 @@ def update_analyze_session(session_id: int, payload: dict):
 
 @app.get('/tradovate/status')
 def tradovate_status():
-    """Check whether Tradovate credentials are configured and token is live."""
     return tv.get_status()
 
 
 @app.get('/tradovate/accounts')
 def tradovate_accounts():
-    """List Tradovate accounts for the configured user."""
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        accounts = tv.get_accounts()
-        return accounts
+        return tv.get_accounts()
     except Exception as e:
         raise HTTPException(502, f'Tradovate API error: {e}')
 
 
 @app.get('/tradovate/balance/{account_id}')
 def tradovate_balance(account_id: int):
-    """Get current cash balance snapshot for a Tradovate account."""
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
@@ -918,20 +914,32 @@ def tradovate_balance(account_id: int):
         raise HTTPException(502, f'Tradovate API error: {e}')
 
 
+@app.post('/tradovate/ws-sync')
+def tradovate_ws_sync():
+    """
+    Trigger a WebSocket user/syncrequest to load all historical entities
+    into the Tradovate server-side cache. Run this BEFORE preview/sync
+    to ensure all historical trades are returned by fillPair/list.
+    """
+    if not tv._has_credentials():
+        raise HTTPException(503, 'Tradovate credentials not configured.')
+    try:
+        result = tv.trigger_websocket_sync()
+        return result
+    except Exception as e:
+        raise HTTPException(502, f'WebSocket sync failed: {e}')
+
+
 @app.post('/tradovate/sync/{account_id}')
 def tradovate_sync(account_id: int):
     """
-    Sync closed trades from Tradovate into the journal.
-    - Fetches fillPair/list for the account
-    - Creates trading_days for any new dates
-    - Inserts trade_rows for each fill pair
-    - Recomputes day-level P&L stats
-    - Skips fills already imported (idempotent)
+    Full sync: triggers WebSocket session load, then imports all closed
+    fill pairs into the journal. Idempotent — safe to re-run.
     """
     if not tv._has_credentials():
-        raise HTTPException(503, 'Tradovate credentials not configured. Add TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC to your Railway environment variables.')
+        raise HTTPException(503, 'Tradovate credentials not configured. Add TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC to Railway env vars.')
     try:
-        result = tv.sync_fills_to_journal(account_id)
+        result = tv.sync_fills_to_journal(account_id, run_ws_sync=True)
         return result
     except RuntimeError as e:
         raise HTTPException(503, str(e))
@@ -942,35 +950,36 @@ def tradovate_sync(account_id: int):
 @app.get('/tradovate/preview/{account_id}')
 def tradovate_preview(account_id: int):
     """
-    Preview what would be imported without writing to the database.
-    Returns the raw fillPairs and mapped trade rows.
+    Preview trades that would be imported. Also enriches with fill details
+    to show real symbols, timestamps and P&L.
     """
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        # Fetch all fill pairs unfiltered so we can see what accountId field looks like
         all_fill_pairs = tv._get('fillPair/list')
         if not isinstance(all_fill_pairs, list):
             all_fill_pairs = []
 
-        # Show distinct accountIds seen, so we can verify the filter is correct
         seen_account_ids = list({fp.get('accountId') for fp in all_fill_pairs if fp.get('accountId') is not None})
-
-        # Apply the same filter as the sync (include if accountId matches OR is absent)
         fill_pairs = [fp for fp in all_fill_pairs
                       if fp.get('accountId') is None or fp.get('accountId') == account_id]
 
-        contract_ids = [fp['contractId'] for fp in fill_pairs if fp.get('contractId')]
-        contracts = tv.get_contracts_by_ids(contract_ids)
+        # Enrich with fill-level details to get contractId + timestamps
+        fill_pairs = tv.enrich_fill_pairs(fill_pairs, account_id)
+
+        # Fetch contracts
+        contract_ids = [fp['_fill_buy'].get('contractId') or fp['_fill_sell'].get('contractId')
+                        for fp in fill_pairs]
+        contracts = tv.get_contracts_by_ids([c for c in contract_ids if c])
         rows = [tv._fill_pair_to_row(fp, contracts) for fp in fill_pairs]
 
         return {
-            'account_id_requested': account_id,
+            'account_id_requested':    account_id,
             'account_ids_in_response': seen_account_ids,
             'total_fill_pairs_returned': len(all_fill_pairs),
-            'fill_pair_count': len(fill_pairs),
-            'preview': rows[:50],
-            'raw_sample': all_fill_pairs[:3],  # First 3 unfiltered for field inspection
+            'fill_pair_count':         len(fill_pairs),
+            'preview':                 rows[:50],
+            'raw_sample':              all_fill_pairs[:3],
         }
     except Exception as e:
         raise HTTPException(502, f'Preview failed: {e}')
