@@ -14,6 +14,8 @@ def get_conn():
 def init_db():
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('CREATE EXTENSION IF NOT EXISTS vector;')
+
+        # ── Core tables ──────────────────────────
         cur.execute('''
         CREATE TABLE IF NOT EXISTS trading_days (
           id SERIAL PRIMARY KEY,
@@ -56,7 +58,8 @@ def init_db():
         cur.execute('''
         CREATE TABLE IF NOT EXISTS playbook_patterns (
           id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL, description TEXT DEFAULT '', rules TEXT DEFAULT '', tags TEXT DEFAULT '',
-          win_rate REAL DEFAULT NULL, avg_r_multiple REAL DEFAULT NULL, custom_fields JSONB DEFAULT '{}'::jsonb,
+          win_rate REAL DEFAULT NULL, avg_r_multiple REAL DEFAULT NULL, sample_count INTEGER DEFAULT 0,
+          avg_pnl REAL DEFAULT NULL, custom_fields JSONB DEFAULT '{}'::jsonb,
           created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
         );''')
         cur.execute('''
@@ -65,7 +68,60 @@ def init_db():
           pattern_id INTEGER REFERENCES playbook_patterns(id) ON DELETE CASCADE,
           confidence REAL DEFAULT 0, notes TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(day_id, pattern_id)
         );''')
+
+        # ── Step 1: Performance metrics + structured AI columns ──
+        migrations = [
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS pnl REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS num_trades INTEGER DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS win_count INTEGER DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS loss_count INTEGER DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS r_multiple REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS execution_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS bias_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS patience_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS entry_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS risk_mgmt_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS profit_taking_score REAL DEFAULT NULL",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS biggest_mistake TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS biggest_strength TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS ai_pattern_tags TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS gap_direction TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS premarket_trend TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS volume_assessment TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS key_levels TEXT DEFAULT ''",
+            "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS likely_scenarios TEXT DEFAULT ''",
+            "ALTER TABLE playbook_patterns ADD COLUMN IF NOT EXISTS sample_count INTEGER DEFAULT 0",
+            "ALTER TABLE playbook_patterns ADD COLUMN IF NOT EXISTS avg_pnl REAL DEFAULT NULL",
+        ]
+        for m in migrations:
+            try:
+                cur.execute(m)
+            except Exception:
+                pass
+
+        # ── Indexes ──────────────────────────────
         cur.execute('CREATE INDEX IF NOT EXISTS idx_days_date ON trading_days(trade_date DESC);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_uploads_day ON uploads(day_id);')
         cur.execute('CREATE INDEX IF NOT EXISTS idx_similar_source ON similar_day_links(source_day_id);')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_days_pnl ON trading_days(pnl) WHERE pnl IS NOT NULL;')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_days_pattern_tags ON trading_days USING gin(to_tsvector(\'english\', ai_pattern_tags));')
+
+        # ── Seed default patterns ────────────────
+        default_patterns = [
+            ('Gap and Go', 'Price gaps up/down and continues in the gap direction with momentum'),
+            ('VWAP Reclaim', 'Price crosses back above VWAP after trading below, establishing bullish control'),
+            ('Failed Breakout', 'Price breaks a key level but immediately reverses back through it'),
+            ('Opening Range Breakout', 'Price breaks above or below the opening range (first 15-30 minutes) with conviction'),
+            ('Opening Range Breakdown', 'Price breaks below the opening range with sustained selling'),
+            ('Trend Day', 'Persistent directional move with minimal retracement throughout the session'),
+            ('Reversal Day', 'Market opens in one direction then reverses and closes in the opposite direction'),
+            ('Chop Day', 'Range-bound session with no clear directional bias, mean-reverting price action'),
+            ('Liquidity Sweep', 'Price takes out a key high/low to grab liquidity then reverses sharply'),
+            ('CISD', 'Change in State of Delivery — shift from distribution to accumulation or vice versa'),
+            ('Power of 3', 'Accumulation, manipulation, distribution sequence within a session'),
+            ('FVG Entry', 'Entry taken at a Fair Value Gap left by an impulsive move'),
+        ]
+        for name, desc in default_patterns:
+            cur.execute('INSERT INTO playbook_patterns(name, description) VALUES(%s, %s) ON CONFLICT(name) DO NOTHING', (name, desc))
+
         conn.commit()
