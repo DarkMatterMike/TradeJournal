@@ -1,6 +1,6 @@
 import csv, io, json, os
+from contextlib import asynccontextmanager
 from psycopg.types.json import Json
-from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -9,13 +9,16 @@ from .storage import R2Storage
 from .ai import analyze_chart_image_bytes, summarize_day, embed_text, has_ai
 
 load_dotenv()
-app = FastAPI(title='Trading Intelligence Database V3')
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    yield
+
+app = FastAPI(title='Trading Intelligence Database V3', lifespan=lifespan)
 origins=[x.strip() for x in os.getenv('CORS_ORIGINS','http://localhost:5173').split(',') if x.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=['*'], allow_headers=['*'])
 storage = R2Storage()
-
-@app.on_event('startup')
-def startup(): init_db()
 
 @app.get('/health')
 def health(): return {'ok': True, 'ai_enabled': has_ai(), 'r2_enabled': storage.enabled}
@@ -39,7 +42,7 @@ def create_day(payload:dict):
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''INSERT INTO trading_days (trade_date,title,tickers,strategy,session,market_bias,premarket_notes,trade_notes,ideal_notes,lessons,tags,mood,rule_following_score,custom_fields)
         VALUES (%(trade_date)s,COALESCE(%(title)s,''),COALESCE(%(tickers)s,''),COALESCE(%(strategy)s,''),COALESCE(%(session)s,''),COALESCE(%(market_bias)s,''),COALESCE(%(premarket_notes)s,''),COALESCE(%(trade_notes)s,''),COALESCE(%(ideal_notes)s,''),COALESCE(%(lessons)s,''),COALESCE(%(tags)s,''),COALESCE(%(mood)s,''),%(rule_following_score)s,%(custom_fields)s)
-        ON CONFLICT (trade_date) DO UPDATE SET title=EXCLUDED.title, updated_at=NOW() RETURNING *''', vals)
+        ON CONFLICT (trade_date) DO UPDATE SET title=EXCLUDED.title,tickers=EXCLUDED.tickers,strategy=EXCLUDED.strategy,session=EXCLUDED.session,market_bias=EXCLUDED.market_bias,premarket_notes=EXCLUDED.premarket_notes,trade_notes=EXCLUDED.trade_notes,ideal_notes=EXCLUDED.ideal_notes,lessons=EXCLUDED.lessons,tags=EXCLUDED.tags,mood=EXCLUDED.mood,rule_following_score=EXCLUDED.rule_following_score,custom_fields=EXCLUDED.custom_fields,updated_at=NOW() RETURNING *''', vals)
         row=cur.fetchone(); conn.commit(); return row
 
 @app.get('/days/{day_id}')
@@ -69,6 +72,7 @@ def update_day(day_id:int, payload:dict):
 async def upload(day_id:int, kind:str=Form(...), file:UploadFile=File(...), run_ai:bool=Form(True)):
     content = await file.read()
     if not content: raise HTTPException(400,'Empty file')
+    if not storage.enabled: raise HTTPException(503,'File storage is not configured. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET environment variables.')
     stored = storage.put_file(day_id=day_id, kind=kind, filename=file.filename, content=content, content_type=file.content_type)
     extracted=''; ai_json={}; ai_desc=''
     if kind=='csv':
@@ -139,7 +143,8 @@ def create_pattern(payload:dict):
         row=cur.fetchone(); conn.commit(); return row
 
 @app.post('/days/{day_id}/patterns/{pattern_id}')
-def link_pattern(day_id:int, pattern_id:int, payload:dict={}):
+def link_pattern(day_id:int, pattern_id:int, payload:dict=None):
+    if payload is None: payload = {}
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute('''INSERT INTO day_pattern_links(day_id,pattern_id,confidence,notes) VALUES(%s,%s,%s,%s) ON CONFLICT(day_id,pattern_id) DO UPDATE SET confidence=EXCLUDED.confidence, notes=EXCLUDED.notes RETURNING *''',(day_id,pattern_id,payload.get('confidence',1),payload.get('notes','')))
         row=cur.fetchone(); conn.commit(); return row

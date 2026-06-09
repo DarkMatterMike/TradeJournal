@@ -3,25 +3,62 @@ import {createRoot} from 'react-dom/client';
 import {Upload, Brain, Link2, Save, Search} from 'lucide-react';
 import './style.css';
 const API=import.meta.env.VITE_API_BASE_URL||'http://127.0.0.1:8000';
-async function api(path, opts={}){const r=await fetch(API+path,{headers:opts.body instanceof FormData?{}:{'Content-Type':'application/json'},...opts}); if(!r.ok) throw new Error(await r.text()); return r.json();}
+
+async function api(path, opts={}){
+  const r=await fetch(API+path,{headers:opts.body instanceof FormData?{}:{'Content-Type':'application/json'},...opts});
+  if(!r.ok){
+    let msg=`Request failed (${r.status})`;
+    try{ const body=await r.json(); msg=body.detail||JSON.stringify(body); }catch{ try{ msg=await r.text(); }catch{} }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
 function Field({label,value,onChange,textarea,type='text'}){return <label><span>{label}</span>{textarea?<textarea value={value||''} onChange={e=>onChange(e.target.value)}/>:<input type={type} value={value||''} onChange={e=>onChange(e.target.value)}/>}</label>}
+
 function App(){
  const [days,setDays]=useState([]),[selected,setSelected]=useState(null),[bundle,setBundle]=useState(null),[q,setQ]=useState(''),[status,setStatus]=useState('');
  const [draft,setDraft]=useState({trade_date:new Date().toISOString().slice(0,10),title:'',tickers:'',strategy:'',session:'',market_bias:'',premarket_notes:'',trade_notes:'',ideal_notes:'',lessons:'',tags:'',mood:''});
- const load=async()=>{setDays(await api('/days'+(q?`?q=${encodeURIComponent(q)}`:'')))};
- const openDay=async(id)=>{setSelected(id); const b=await api('/days/'+id); setBundle(b); setDraft(b.day)};
+ const emptyDraft=()=>({trade_date:new Date().toISOString().slice(0,10),title:'',tickers:'',strategy:'',session:'',market_bias:'',premarket_notes:'',trade_notes:'',ideal_notes:'',lessons:'',tags:'',mood:''});
+
+ const load=async()=>{try{setDays(await api('/days'+(q?`?q=${encodeURIComponent(q)}`:'')))}catch(e){setStatus('Error loading days: '+e.message)}};
+ const openDay=async(id)=>{try{setSelected(id); const b=await api('/days/'+id); setBundle(b); setDraft(b.day)}catch(e){setStatus('Error opening day: '+e.message)}};
  useEffect(()=>{load()},[]);
- const save=async()=>{setStatus('Saving...'); const row= selected? await api('/days/'+selected,{method:'PUT',body:JSON.stringify(draft)}): await api('/days',{method:'POST',body:JSON.stringify(draft)}); setSelected(row.id); await openDay(row.id); await load(); setStatus('Saved')};
- const upload=async(kind, file)=>{if(!file||!selected)return; setStatus('Uploading to Cloudflare R2...'); const fd=new FormData(); fd.append('kind',kind); fd.append('file',file); fd.append('run_ai','true'); await api(`/days/${selected}/upload`,{method:'POST',body:fd}); await openDay(selected); setStatus('Uploaded')};
- const intelligence=async()=>{setStatus('Running Trading Intelligence...'); await api(`/days/${selected}/intelligence`,{method:'POST',body:JSON.stringify({})}); await openDay(selected); await load(); setStatus('Intelligence complete')};
- const similar=async()=>{setStatus('Finding similar days...'); await api(`/days/${selected}/find-similar?limit=10`,{method:'POST',body:JSON.stringify({})}); await openDay(selected); setStatus('Similar days linked')};
+
+ const save=async()=>{
+   try{
+     setStatus('Saving...');
+     const row= selected? await api('/days/'+selected,{method:'PUT',body:JSON.stringify(draft)}): await api('/days',{method:'POST',body:JSON.stringify(draft)});
+     setSelected(row.id); await openDay(row.id); await load(); setStatus('Saved');
+   }catch(e){setStatus('Save failed: '+e.message)}
+ };
+
+ const upload=async(kind, file)=>{
+   if(!file||!selected)return;
+   try{
+     setStatus('Uploading to Cloudflare R2...');
+     const fd=new FormData(); fd.append('kind',kind); fd.append('file',file); fd.append('run_ai','true');
+     await api(`/days/${selected}/upload`,{method:'POST',body:fd}); await openDay(selected); setStatus('Uploaded');
+   }catch(e){setStatus('Upload failed: '+e.message)}
+ };
+
+ const intelligence=async()=>{
+   try{setStatus('Running Trading Intelligence...'); await api(`/days/${selected}/intelligence`,{method:'POST',body:JSON.stringify({})}); await openDay(selected); await load(); setStatus('Intelligence complete');}
+   catch(e){setStatus('Intelligence failed: '+e.message)}
+ };
+
+ const similar=async()=>{
+   try{setStatus('Finding similar days...'); await api(`/days/${selected}/find-similar?limit=10`,{method:'POST',body:JSON.stringify({})}); await openDay(selected); setStatus('Similar days linked');}
+   catch(e){setStatus('Similar search failed: '+e.message)}
+ };
+
  return <div><header><h1>Trading Intelligence Database</h1><p>Cloudflare R2 + Neon pgvector + Railway API + Vercel UI</p></header><main>
-  <aside><div className="search"><Search size={16}/><input placeholder="Search days, tickers, tags" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')load()}}/><button onClick={load}>Search</button></div><button className="new" onClick={()=>{setSelected(null);setBundle(null);setDraft({trade_date:new Date().toISOString().slice(0,10),title:'',tickers:'',strategy:'',session:'',market_bias:'',premarket_notes:'',trade_notes:'',ideal_notes:'',lessons:'',tags:'',mood:''})}}>+ New Day</button>{days.map(d=><button key={d.id} className={'day '+(selected===d.id?'active':'')} onClick={()=>openDay(d.id)}><b>{d.trade_date}</b><span>{d.tickers||d.title||'Untitled'}</span><small>{d.tags}</small></button>)}</aside>
+  <aside><div className="search"><Search size={16}/><input placeholder="Search days, tickers, tags" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')load()}}/><button onClick={load}>Search</button></div><button className="new" onClick={()=>{setSelected(null);setBundle(null);setDraft(emptyDraft())}}>+ New Day</button>{days.map(d=><button key={d.id} className={'day '+(selected===d.id?'active':'')} onClick={()=>openDay(d.id)}><b>{d.trade_date}</b><span>{d.tickers||d.title||'Untitled'}</span><small>{d.tags}</small></button>)}</aside>
   <section className="editor"><div className="grid"><Field label="Date" type="date" value={draft.trade_date} onChange={v=>setDraft({...draft,trade_date:v})}/><Field label="Tickers" value={draft.tickers} onChange={v=>setDraft({...draft,tickers:v})}/><Field label="Title" value={draft.title} onChange={v=>setDraft({...draft,title:v})}/><Field label="Strategy" value={draft.strategy} onChange={v=>setDraft({...draft,strategy:v})}/><Field label="Session" value={draft.session} onChange={v=>setDraft({...draft,session:v})}/><Field label="Mood" value={draft.mood} onChange={v=>setDraft({...draft,mood:v})}/></div>
   <Field label="Market Bias" textarea value={draft.market_bias} onChange={v=>setDraft({...draft,market_bias:v})}/><Field label="Premarket Notes" textarea value={draft.premarket_notes} onChange={v=>setDraft({...draft,premarket_notes:v})}/><Field label="Trade Taken Notes" textarea value={draft.trade_notes} onChange={v=>setDraft({...draft,trade_notes:v})}/><Field label="Ideal Trade Notes" textarea value={draft.ideal_notes} onChange={v=>setDraft({...draft,ideal_notes:v})}/><Field label="Lessons" textarea value={draft.lessons} onChange={v=>setDraft({...draft,lessons:v})}/><Field label="Tags" value={draft.tags} onChange={v=>setDraft({...draft,tags:v})}/>
   <div className="actions"><button onClick={save}><Save size={16}/> Save Editable Details</button>{selected&&<><button onClick={intelligence}><Brain size={16}/> Run Intelligence</button><button onClick={similar}><Link2 size={16}/> Find Similar Days</button></>}</div><p className="status">{status}</p>
   {selected&&<div className="uploads"><h2>Uploads</h2>{['premarket','trade','ideal','csv','other'].map(k=><label className="upload" key={k}><Upload size={16}/>{k}<input type="file" accept={k==='csv'?'.csv':'image/*,.csv'} onChange={e=>upload(k,e.target.files[0])}/></label>)}</div>}
-  {bundle&&<><div className="panel"><h2>AI Summary</h2><p>{bundle.day.ai_summary||'No AI summary yet.'}</p><pre>{JSON.stringify(bundle.day.ai_market_structure||{},null,2)}</pre><pre>{JSON.stringify(bundle.day.ai_execution_review||{},null,2)}</pre></div><div className="cards"><div><h2>Files</h2>{bundle.uploads.map(u=><div className="card" key={u.id}><b>{u.kind}: {u.filename}</b><a href={u.url} target="_blank">Open file</a><small>{u.ai_description?.slice(0,280)}</small></div>)}</div><div><h2>Similar Days</h2>{bundle.similar.map(s=><button className="card linkcard" key={s.id} onClick={()=>openDay(s.matched_day_id)}><b>{s.trade_date} — {Math.round((s.similarity_score||0)*100)}%</b><span>{s.tickers} {s.title}</span><small>{s.reason}</small></button>)}</div></div><div className="panel"><h2>CSV Trade Rows</h2><pre>{JSON.stringify(bundle.trade_rows.slice(0,20),null,2)}</pre></div></>}
+  {bundle&&<><div className="panel"><h2>AI Summary</h2><p>{bundle.day.ai_summary||'No AI summary yet.'}</p><pre>{JSON.stringify(bundle.day.ai_market_structure||{},null,2)}</pre><pre>{JSON.stringify(bundle.day.ai_execution_review||{},null,2)}</pre></div><div className="cards"><div><h2>Files</h2>{bundle.uploads.map(u=><div className="card" key={u.id}><b>{u.kind}: {u.filename}</b><a href={u.url} target="_blank" rel="noopener noreferrer">Open file</a><small>{u.ai_description?.slice(0,280)}</small></div>)}</div><div><h2>Similar Days</h2>{bundle.similar.map(s=><button className="card linkcard" key={s.id} onClick={()=>openDay(s.matched_day_id)}><b>{s.trade_date} — {Math.round((s.similarity_score||0)*100)}%</b><span>{s.tickers} {s.title}</span><small>{s.reason}</small></button>)}</div></div><div className="panel"><h2>CSV Trade Rows</h2><pre>{JSON.stringify(bundle.trade_rows.slice(0,20),null,2)}</pre></div></>}
   </section></main></div>
 }
 createRoot(document.getElementById('root')).render(<App/>);
