@@ -816,7 +816,7 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
           </span>
         </div>
         {!authorized && (
-          <a href="/tradovate/oauth/start" target="_blank" rel="noopener noreferrer"
+          <a href={`${API}/tradovate/oauth/start`} target="_blank" rel="noopener noreferrer"
             className="btn btn--primary" style={{ fontSize: 13, textDecoration: 'none' }}>
             Connect Tradovate Account →
           </a>
