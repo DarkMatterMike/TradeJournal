@@ -591,7 +591,8 @@ def delete_pattern(pattern_id: int):
 @app.post('/analyze')
 async def analyze_premarket(file: UploadFile = File(...)):
     """Upload a premarket screenshot without creating a day.
-    Returns chart analysis, similar days, aggregated stats, and a recommendation."""
+    Returns chart analysis, similar days, aggregated stats, and a recommendation.
+    Each step is wrapped so partial results return even if a later step fails."""
     if not has_ai():
         raise HTTPException(503, 'AI is not configured. Set OPENAI_API_KEY.')
 
@@ -599,50 +600,53 @@ async def analyze_premarket(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(400, 'Empty file')
 
-    # Step 1: Analyze the chart
-    chart_analysis = analyze_chart_image_bytes(content, 'premarket', file.content_type or 'image/png')
-
-    # Step 2: Embed the analysis to find similar days
-    analysis_text = json.dumps(chart_analysis, default=str)
-    emb = embed_text(analysis_text)
-
+    chart_analysis = {}
     similar_days = []
     stats = {}
+    recommendation = {}
 
-    if emb:
-        with get_conn() as conn, conn.cursor() as cur:
-            # Step 3: Find similar days by vector distance
-            cur.execute('''SELECT e.day_id, d.*,
-                MAX(1 - (e.embedding <=> %s::vector)) AS similarity
-                FROM ai_embeddings e JOIN trading_days d ON d.id = e.day_id
-                GROUP BY e.day_id, d.id
-                ORDER BY similarity DESC LIMIT 15''', (emb,))
-            similar_days = cur.fetchall()
+    # Step 1: Analyze the chart
+    try:
+        chart_analysis = analyze_chart_image_bytes(content, 'premarket', file.content_type or 'image/png')
+    except Exception as e:
+        chart_analysis = {'error': f'Chart analysis failed: {e}'}
 
-            # Step 4: Aggregate stats from similar days
-            if similar_days:
-                day_ids = [d['id'] for d in similar_days]
-                cur.execute('''SELECT
-                    COUNT(*) as total,
-                    AVG(pnl) as avg_pnl,
-                    SUM(pnl) as total_pnl,
-                    AVG(execution_score) as avg_score,
-                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
-                    SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
-                    AVG(CASE WHEN pnl > 0 THEN 1.0 WHEN pnl < 0 THEN 0.0 ELSE NULL END) as win_rate
-                    FROM trading_days WHERE id = ANY(%s) AND pnl IS NOT NULL''', (day_ids,))
-                stats = cur.fetchone() or {}
+    # Step 2-4: Embed, find similar, aggregate stats
+    try:
+        analysis_text = json.dumps(chart_analysis, default=str)
+        emb = embed_text(analysis_text)
+        if emb:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute('''SELECT e.day_id, d.*,
+                    MAX(1 - (e.embedding <=> %s::vector)) AS similarity
+                    FROM ai_embeddings e JOIN trading_days d ON d.id = e.day_id
+                    GROUP BY e.day_id, d.id
+                    ORDER BY similarity DESC LIMIT 15''', (emb,))
+                similar_days = cur.fetchall()
+                if similar_days:
+                    day_ids = [d['id'] for d in similar_days]
+                    cur.execute('''SELECT COUNT(*) as total, AVG(pnl) as avg_pnl, SUM(pnl) as total_pnl,
+                        AVG(execution_score) as avg_score,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                        AVG(CASE WHEN pnl > 0 THEN 1.0 WHEN pnl < 0 THEN 0.0 ELSE NULL END) as win_rate
+                        FROM trading_days WHERE id = ANY(%s) AND pnl IS NOT NULL''', (day_ids,))
+                    stats = cur.fetchone() or {}
+                    cur.execute('''SELECT p.name, COUNT(*) as cnt FROM day_pattern_links dpl
+                        JOIN playbook_patterns p ON p.id = dpl.pattern_id
+                        WHERE dpl.day_id = ANY(%s) GROUP BY p.name ORDER BY cnt DESC LIMIT 5''', (day_ids,))
+                    stats['common_patterns'] = cur.fetchall()
+    except Exception as e:
+        stats['error'] = f'Similar day search failed: {e}'
 
-                # Get common patterns
-                cur.execute('''SELECT p.name, COUNT(*) as cnt
-                    FROM day_pattern_links dpl
-                    JOIN playbook_patterns p ON p.id = dpl.pattern_id
-                    WHERE dpl.day_id = ANY(%s)
-                    GROUP BY p.name ORDER BY cnt DESC LIMIT 5''', (day_ids,))
-                stats['common_patterns'] = cur.fetchall()
-
-    # Step 5: Generate AI recommendation
-    recommendation = generate_recommendation(chart_analysis, similar_days)
+    # Step 5: Generate recommendation (skip if no similar days to save time)
+    try:
+        if similar_days:
+            recommendation = generate_recommendation(chart_analysis, similar_days)
+        else:
+            recommendation = {'recommendation': 'No historical data to compare against yet. Log some trading days first, then this will show personalized recommendations.', 'times_seen': 0}
+    except Exception as e:
+        recommendation = {'recommendation': f'Recommendation generation failed: {e}', 'times_seen': len(similar_days)}
 
     return {
         'chart_analysis': chart_analysis,
