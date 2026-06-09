@@ -956,8 +956,9 @@ def tradovate_preview(account_id: int):
         # Show distinct accountIds seen, so we can verify the filter is correct
         seen_account_ids = list({fp.get('accountId') for fp in all_fill_pairs if fp.get('accountId') is not None})
 
-        # Apply the filter for the requested account_id
-        fill_pairs = [fp for fp in all_fill_pairs if fp.get('accountId') == account_id]
+        # Apply the same filter as the sync (include if accountId matches OR is absent)
+        fill_pairs = [fp for fp in all_fill_pairs
+                      if fp.get('accountId') is None or fp.get('accountId') == account_id]
 
         contract_ids = [fp['contractId'] for fp in fill_pairs if fp.get('contractId')]
         contracts = tv.get_contracts_by_ids(contract_ids)

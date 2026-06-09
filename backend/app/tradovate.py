@@ -169,25 +169,37 @@ def get_fill_pairs(account_id: int) -> list:
     """
     Return closed round-trip trades (fillPair/list).
     Each fillPair represents a completed position: entry fill + exit fill.
-    Fields include: buyFillId, sellFillId, qty, buyPrice, sellPrice,
-    realizedPnl, tradovateTradeDate, contractId, etc.
+
+    Tradovate sometimes omits accountId on fillPair objects (especially for
+    single-account users). Strategy: include a fillPair if its accountId
+    matches OR if accountId is absent (single-account assumption).
     """
     data = _get('fillPair/list')
     if not isinstance(data, list):
         return []
-    # Filter to this account
-    return [fp for fp in data if fp.get('accountId') == account_id]
+
+    filtered = []
+    for fp in data:
+        fp_account_id = fp.get('accountId')
+        if fp_account_id is None:
+            # No accountId on the record — include it (single-account user)
+            filtered.append(fp)
+        elif fp_account_id == account_id:
+            filtered.append(fp)
+    return filtered
 
 
 def get_fills(account_id: int) -> list:
-    """
-    Return individual fill executions (fill/list).
-    Used as fallback / for partial-fill details.
-    """
+    """Return individual fill executions. Same accountId-absent logic as fillPairs."""
     data = _get('fill/list')
     if not isinstance(data, list):
         return []
-    return [f for f in data if f.get('accountId') == account_id]
+    filtered = []
+    for f in data:
+        f_account_id = f.get('accountId')
+        if f_account_id is None or f_account_id == account_id:
+            filtered.append(f)
+    return filtered
 
 
 def get_contracts_by_ids(contract_ids: list[int]) -> dict:
@@ -219,32 +231,55 @@ def _parse_tradovate_ts(ts_str: str | None) -> datetime | None:
 
 
 def _fill_pair_to_row(fp: dict, contracts: dict) -> dict:
-    """Convert a Tradovate fillPair object to a trade_row row_data dict."""
+    """
+    Convert a Tradovate fillPair object to a trade_row row_data dict.
+    Stores all raw fields too so nothing is lost before we know the exact schema.
+    """
     contract_id = fp.get('contractId')
     contract = contracts.get(contract_id, {})
-    symbol = contract.get('name') or contract.get('symbol') or f'contract_{contract_id}'
+    symbol = (contract.get('name') or contract.get('symbol') or
+              fp.get('contractName') or f'contract_{contract_id}')
 
-    buy_price = fp.get('buyPrice') or fp.get('buyFillPrice')
-    sell_price = fp.get('sellPrice') or fp.get('sellFillPrice')
-    qty = fp.get('qty', 1)
-    pnl = fp.get('realizedPnl')
-    entry_time = _parse_tradovate_ts(fp.get('entryTime') or fp.get('buyTime'))
-    exit_time = _parse_tradovate_ts(fp.get('exitTime') or fp.get('sellTime'))
-    trade_ts = _parse_tradovate_ts(fp.get('tradovateTradeDate') or fp.get('createdTimestamp'))
+    # Price fields — try multiple names Tradovate may use
+    buy_price  = (fp.get('buyPrice')  or fp.get('buyFillPrice')  or
+                  fp.get('entryPrice') if fp.get('openSide') == 'Buy' else None)
+    sell_price = (fp.get('sellPrice') or fp.get('sellFillPrice') or
+                  fp.get('exitPrice')  if fp.get('openSide') == 'Sell' else None)
 
-    # Determine direction from fill pair
-    # In Tradovate fillPairs, buy = long entry, sell = short entry
-    # The pair has buyFillId and sellFillId; the "openSide" or ordering tells us direction
-    open_side = fp.get('openSide', '')  # 'Buy' or 'Sell' if available
-    if not open_side:
-        # Infer: if entry_time < exit_time, buy came first → long
-        open_side = 'Buy'  # default; adjust based on actual API response structure
+    # Fallback: use generic price fields
+    if buy_price is None:
+        buy_price = fp.get('price') or fp.get('buyFillPrice') or fp.get('entryPrice')
+    if sell_price is None:
+        sell_price = fp.get('sellFillPrice') or fp.get('exitPrice')
 
-    side = 'Long' if open_side in ('Buy', 'buy') else 'Short'
-    entry_price = buy_price if side == 'Long' else sell_price
-    exit_price = sell_price if side == 'Long' else buy_price
+    qty = fp.get('qty') or fp.get('quantity') or fp.get('contractQty') or 1
+    pnl = (fp.get('realizedPnl') or fp.get('pnl') or fp.get('gainLoss') or
+           fp.get('tradePnl') or fp.get('netPnl'))
+
+    # Timestamps — try every variant
+    entry_time = _parse_tradovate_ts(
+        fp.get('entryTime') or fp.get('buyTime') or fp.get('openTime') or
+        fp.get('createdTimestamp') or fp.get('timestamp')
+    )
+    exit_time = _parse_tradovate_ts(
+        fp.get('exitTime') or fp.get('sellTime') or fp.get('closeTime') or
+        fp.get('tradovateTradeDate')
+    )
+    trade_ts = entry_time or exit_time or _parse_tradovate_ts(
+        fp.get('tradovateTradeDate') or fp.get('createdTimestamp')
+    )
+
+    # Direction
+    open_side = fp.get('openSide') or fp.get('side') or fp.get('buySell') or ''
+    side = 'Long' if open_side in ('Buy', 'buy', 'Long', 'long', 'B') else \
+           'Short' if open_side in ('Sell', 'sell', 'Short', 'short', 'S') else \
+           'Long'  # default until we see a real response
+
+    entry_price = buy_price  if side == 'Long'  else sell_price
+    exit_price  = sell_price if side == 'Long'  else buy_price
 
     return {
+        # Mapped fields
         'tradovate_fill_pair_id': fp.get('id'),
         'symbol': symbol,
         'side': side,
@@ -254,8 +289,10 @@ def _fill_pair_to_row(fp: dict, contracts: dict) -> dict:
         'pnl': pnl,
         'entry_time': entry_time.isoformat() if entry_time else None,
         'exit_time': exit_time.isoformat() if exit_time else None,
-        'trade_date': (exit_time or entry_time or trade_ts).date().isoformat() if (exit_time or entry_time or trade_ts) else None,
+        'trade_date': trade_ts.date().isoformat() if trade_ts else None,
         'source': 'tradovate_sync',
+        # Raw dump — preserves everything for future mapping refinement
+        '_raw': fp,
     }
 
 
