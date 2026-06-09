@@ -114,7 +114,98 @@ function AnalysisResultCards({ result, onOpenDay }) {
   </>;
 }
 
-function App() {
+// ── Calendar Heatmap ─────────────────────────────────
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const DAYS_SHORT = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+function CalendarHeatmap({ calendarData, onDayClick, viewYear, viewMonth, onPrev, onNext }) {
+  // Build a lookup: "YYYY-MM-DD" -> day row
+  const byDate = {};
+  (calendarData || []).forEach(d => { byDate[d.trade_date] = d; });
+
+  // Compute scale: max abs pnl for color intensity
+  const pnls = (calendarData || []).map(d => d.pnl).filter(v => v != null);
+  const maxAbs = pnls.length ? Math.max(...pnls.map(Math.abs), 1) : 1;
+
+  const year = viewYear;
+  const month = viewMonth; // 0-indexed
+
+  // First day of month, number of days
+  const firstDay = new Date(year, month, 1).getDay(); // 0=Sun
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  // Build grid: 6 rows x 7 cols
+  const cells = [];
+  for (let i = 0; i < firstDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const isoDate = (d) => `${year}-${String(month + 1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+
+  const cellColor = (day) => {
+    if (!day) return 'transparent';
+    const row = byDate[isoDate(day)];
+    if (!row || row.pnl == null) return 'var(--surface-1)';
+    const intensity = Math.min(Math.abs(row.pnl) / maxAbs, 1);
+    if (row.pnl > 0) {
+      // green: low intensity = muted, high = bright
+      const g = Math.round(120 + intensity * 82);  // 120-202
+      const r = Math.round(20 + (1 - intensity) * 40);
+      const b = Math.round(80 + (1 - intensity) * 85);
+      return `rgba(${r},${g},${b},${0.25 + intensity * 0.75})`;
+    } else {
+      const r = Math.round(180 + intensity * 52);
+      const g = Math.round(30 + (1 - intensity) * 50);
+      const b = Math.round(40 + (1 - intensity) * 59);
+      return `rgba(${r},${g},${b},${0.25 + intensity * 0.75})`;
+    }
+  };
+
+  const today = new Date();
+  const isToday = (d) => d && today.getFullYear() === year && today.getMonth() === month && today.getDate() === d;
+
+  return (
+    <div className="cal-heatmap">
+      <div className="cal-heatmap__nav">
+        <button className="btn btn--ghost cal-nav-btn" onClick={onPrev}><ChevronLeft size={15} /></button>
+        <span className="cal-heatmap__title">{MONTHS[month]} {year}</span>
+        <button className="btn btn--ghost cal-nav-btn" onClick={onNext}><ChevronRight size={15} /></button>
+      </div>
+      <div className="cal-heatmap__grid">
+        {DAYS_SHORT.map(d => <div key={d} className="cal-heatmap__dow">{d}</div>)}
+        {cells.map((day, i) => {
+          const row = day ? byDate[isoDate(day)] : null;
+          return (
+            <div
+              key={i}
+              className={`cal-heatmap__cell ${day ? 'cal-heatmap__cell--active' : ''} ${isToday(day) ? 'cal-heatmap__cell--today' : ''} ${row ? 'cal-heatmap__cell--traded' : ''}`}
+              style={{ background: cellColor(day) }}
+              onClick={() => row && onDayClick(row.id)}
+              title={row ? `${isoDate(day)}\n${row.tickers || ''}\nP&L: ${pnl$(row.pnl)}\nTrades: ${row.num_trades ?? '—'}\nScore: ${row.execution_score != null ? Math.round(row.execution_score) : '—'}` : day ? isoDate(day) : ''}
+            >
+              {day && <span className="cal-heatmap__day-num">{day}</span>}
+              {row?.pnl != null && <span className={`cal-heatmap__pnl ${pnlC(row.pnl)}`}>{row.pnl >= 0 ? '+' : ''}{Math.round(row.pnl)}</span>}
+            </div>
+          );
+        })}
+      </div>
+      <div className="cal-heatmap__legend">
+        <span style={{ color: 'var(--text-3)', fontSize: 11 }}>Loss</span>
+        {[-1,-0.6,-0.3,0.3,0.6,1].map(v => (
+          <div key={v} style={{
+            width: 16, height: 16, borderRadius: 3,
+            background: v < 0
+              ? `rgba(${Math.round(180+Math.abs(v)*52)},${Math.round(30+(1-Math.abs(v))*50)},${Math.round(40+(1-Math.abs(v))*59)},${0.25+Math.abs(v)*0.75})`
+              : `rgba(${Math.round(20+(1-v)*40)},${Math.round(120+v*82)},${Math.round(80+(1-v)*85)},${0.25+v*0.75})`
+          }} />
+        ))}
+        <span style={{ color: 'var(--text-3)', fontSize: 11 }}>Win</span>
+      </div>
+    </div>
+  );
+}
+
+
   const [page, setPage] = useState('dashboard');
   const [days, setDays] = useState([]);
   const [stats, setStats] = useState(null);
@@ -131,14 +222,18 @@ function App() {
   const [editingPattern, setEditingPattern] = useState(null);
   const [patternDraft, setPatternDraft] = useState({});
 
+  // ── Calendar state ────────────────────────────────
+  const [calendarData, setCalendarData] = useState([]);
+  const [calView, setCalView] = useState({ year: new Date().getFullYear(), month: new Date().getMonth() });
+
   // ── Analyze state ─────────────────────────────────
-  const [analyzeTab, setAnalyzeTab] = useState('upload');   // 'upload' | 'history'
-  const [analyzeResult, setAnalyzeResult] = useState(null);
+  const [analyzeTab, setAnalyzeTab] = useState('upload');   // 'upload' | 'history'  const [analyzeResult, setAnalyzeResult] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeConfig, setAnalyzeConfig] = useState({
     analysis_type: 'premarket',
     trade_date: new Date().toISOString().slice(0, 10),
     notes: '',
+    focus: '',
     link_to_day: false,
   });
   const [history, setHistory] = useState([]);
@@ -153,6 +248,11 @@ function App() {
   const load = async () => { try { setDays(await api('/days' + (q ? `?q=${encodeURIComponent(q)}` : ''))); } catch (e) { setStatus('Error: ' + e.message); } };
   const loadStats = async () => { try { setStats(await api('/stats')); } catch {} };
   const loadPatterns = async () => { try { setPatterns(await api('/patterns')); } catch {} };
+  const loadCalendar = async (year, month0) => {
+    try { setCalendarData(await api(`/calendar?year=${year}&month=${month0 + 1}`)); } catch {}
+  };
+  const calPrev = () => { const d = new Date(calView.year, calView.month - 1, 1); const v = { year: d.getFullYear(), month: d.getMonth() }; setCalView(v); loadCalendar(v.year, v.month); };
+  const calNext = () => { const d = new Date(calView.year, calView.month + 1, 1); const v = { year: d.getFullYear(), month: d.getMonth() }; setCalView(v); loadCalendar(v.year, v.month); };
   const openDay = async (id) => { try { setSelected(id); const b = await api('/days/' + id); setBundle(b); setDraft(b.day); setPage('detail'); setDetailTab('overview'); } catch (e) { setStatus('Error: ' + e.message); } };
 
   const loadHistory = async () => {
@@ -186,7 +286,7 @@ function App() {
     catch (e) { setStatus('Failed: ' + e.message); }
   };
 
-  useEffect(() => { load(); loadStats(); loadPatterns(); }, []);
+  useEffect(() => { load(); loadStats(); loadPatterns(); loadCalendar(calView.year, calView.month); }, []);
 
   // Load history when navigating to analyze page
   useEffect(() => { if (page === 'analyze') loadHistory(); }, [page]);
@@ -222,6 +322,7 @@ function App() {
       fd.append('analysis_type', analyzeConfig.analysis_type);
       if (analyzeConfig.link_to_day && analyzeConfig.trade_date) fd.append('trade_date', analyzeConfig.trade_date);
       if (analyzeConfig.notes) fd.append('notes', analyzeConfig.notes);
+      if (analyzeConfig.focus) fd.append('focus', analyzeConfig.focus);
       fd.append('save_session', 'true');
       const result = await api('/analyze', { method: 'POST', body: fd });
       setAnalyzeResult(result);
@@ -250,6 +351,7 @@ function App() {
     { id: 'days', icon: Calendar, label: 'Trade Days' },
     { id: 'intel', icon: Sparkles, label: 'Intelligence' },
     { id: 'patterns', icon: Layers, label: 'Patterns' },
+    { id: 'sync', icon: Activity, label: 'Tradovate Sync' },
   ];
 
   return (
@@ -282,6 +384,17 @@ function App() {
               <div className="day-list">
                 {(stats?.recent_days || []).map(dy => <button key={dy.id} className="day-row" onClick={() => openDay(dy.id)}><span className="day-row__date">{fmt(dy.trade_date)}</span><span className="day-row__ticker">{dy.tickers || dy.title || 'Untitled'}</span><span className="day-row__tags">{dy.ai_pattern_tags || dy.tags || ''}</span><span className={`day-row__pnl ${pnlC(dy.pnl)}`}>{dy.pnl != null ? pnl$(dy.pnl) : '—'}</span><span className="day-row__score">{dy.execution_score != null ? Math.round(dy.execution_score) : '—'}</span><ChevronRight size={14} className="day-row__arrow" /></button>)}
               </div>
+            </div>
+            <div className="section">
+              <div className="section__head"><span className="section__title">Monthly Calendar</span></div>
+              <CalendarHeatmap
+                calendarData={calendarData}
+                onDayClick={openDay}
+                viewYear={calView.year}
+                viewMonth={calView.month}
+                onPrev={calPrev}
+                onNext={calNext}
+              />
             </div>
             {(stats?.top_patterns || []).length > 0 && <div className="section">
               <div className="section__head"><span className="section__title">Top Patterns</span><span className="section__link" onClick={() => setPage('patterns')}>View all</span></div>
@@ -325,6 +438,19 @@ function App() {
                     </div>
                   </label>
                   <Field label="Notes (optional)" value={analyzeConfig.notes} onChange={v => ac('notes', v)} placeholder="Context, ticker, session…" />
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <label className="field">
+                    <span className="field__label">Focus Override <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>— tell the AI what to pay special attention to</span></span>
+                    <input className="field__input" value={analyzeConfig.focus} onChange={e => ac('focus', e.target.value)}
+                      placeholder={
+                        analyzeConfig.analysis_type === 'premarket' ? 'e.g. "focus on the FVG at 19420 and whether NQ is diverging from ES"' :
+                        analyzeConfig.analysis_type === 'trade' ? 'e.g. "check if this entry was inside the 4h FVG and if liquidity was swept first"' :
+                        analyzeConfig.analysis_type === 'postmarket' ? 'e.g. "did the Power of 3 play out and where was the manipulation leg"' :
+                        'e.g. specific levels, patterns, or context to emphasize'
+                      }
+                    />
+                  </label>
                 </div>
 
                 <div className="analyze-upload">
@@ -606,6 +732,10 @@ function App() {
               ))}
             </tbody></table>
           </>}
+
+          {/* ── TRADOVATE SYNC ───────────── */}
+          {page === 'sync' && <TradovateSyncPage onOpenDay={openDay} setStatus={setStatus} />}
+
         </div>
       </div>
 
@@ -613,6 +743,182 @@ function App() {
       <Toast status={status} onClear={() => setStatus('')} />
     </div>
   );
+}
+
+// ── Tradovate Sync Page ───────────────────────────────
+function TradovateSyncPage({ onOpenDay, setStatus }) {
+  const [syncStatus, setSyncStatus] = useState(null);
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccount, setSelectedAccount] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [syncResult, setSyncResult] = useState(null);
+  const [loading, setLoading] = useState('');
+
+  useEffect(() => { loadStatus(); }, []);
+
+  const loadStatus = async () => {
+    try { setSyncStatus(await api('/tradovate/status')); } catch {}
+  };
+
+  const loadAccounts = async () => {
+    setLoading('accounts');
+    try {
+      const accs = await api('/tradovate/accounts');
+      setAccounts(accs);
+      if (accs.length === 1) setSelectedAccount(accs[0].id);
+    } catch (e) { setStatus('Failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
+  const runPreview = async () => {
+    if (!selectedAccount) return;
+    setLoading('preview');
+    setPreview(null);
+    try { setPreview(await api(`/tradovate/preview/${selectedAccount}`)); }
+    catch (e) { setStatus('Preview failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
+  const runSync = async () => {
+    if (!selectedAccount) return;
+    if (!confirm(`Import all closed trades from Tradovate account ${selectedAccount} into your journal?`)) return;
+    setLoading('sync');
+    setSyncResult(null);
+    try {
+      const result = await api(`/tradovate/sync/${selectedAccount}`, { method: 'POST', body: JSON.stringify({}) });
+      setSyncResult(result);
+      setStatus(`Sync complete — ${result.imported} imported, ${result.skipped} skipped`);
+    } catch (e) { setStatus('Sync failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
+  const configured = syncStatus?.configured;
+  const connected = syncStatus?.connected;
+
+  return <>
+    <div className="page-header">
+      <h1 className="page-header__title">Tradovate Sync</h1>
+      <p className="page-header__sub">Auto-import closed trades from your live Tradovate account</p>
+    </div>
+
+    {/* Connection status */}
+    <div className="section">
+      <div className="section__head"><span className="section__title">Connection</span><button className="btn btn--ghost" style={{ fontSize: 12, padding: '4px 10px' }} onClick={loadStatus}>Refresh</button></div>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: configured ? connected ? 'var(--green)' : 'var(--amber)' : 'var(--red)' }} />
+          <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
+            {!configured ? 'Credentials not configured' : connected ? `Connected · token expires in ${Math.round((syncStatus.token_expires_in || 0) / 60)}m` : 'Credentials set, not yet connected'}
+          </span>
+        </div>
+        {configured && !connected && <button className="btn btn--primary" style={{ fontSize: 12 }} onClick={loadAccounts}>{loading === 'accounts' ? <Loader2 size={13} className="spin" /> : null} Connect & List Accounts</button>}
+        {connected && accounts.length === 0 && <button className="btn btn--ghost" style={{ fontSize: 12 }} onClick={loadAccounts}>List Accounts</button>}
+      </div>
+
+      {!configured && <div style={{ marginTop: 16, padding: 16, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)' }}>
+        <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 8 }}>Add these to your Railway environment variables to enable sync:</p>
+        {[
+          ['TRADOVATE_USERNAME', 'Your Tradovate login email/username'],
+          ['TRADOVATE_PASSWORD', 'Your Tradovate password'],
+          ['TRADOVATE_CID', 'Client ID from API settings in your Tradovate account'],
+          ['TRADOVATE_SEC', 'Secret key from API settings'],
+          ['TRADOVATE_APP_ID', 'App name you registered (e.g. "TradeJournal")'],
+          ['TRADOVATE_APP_VERSION', '1.0'],
+        ].map(([k, v]) => (
+          <div key={k} style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+            <code style={{ color: 'var(--accent)', minWidth: 220 }}>{k}</code>
+            <span style={{ color: 'var(--text-3)' }}>{v}</span>
+          </div>
+        ))}
+        <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 12 }}>
+          To get your CID and SEC: Log into Tradovate → top-right menu → API Access → generate an API key. Requires live account with API Access subscription (~$10/mo from Tradovate).
+        </p>
+      </div>}
+    </div>
+
+    {/* Account selector */}
+    {accounts.length > 0 && <div className="section">
+      <div className="section__head"><span className="section__title">Account</span></div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {accounts.map(acc => (
+          <button key={acc.id} className={`btn ${selectedAccount === acc.id ? 'btn--primary' : 'btn--ghost'}`}
+            onClick={() => setSelectedAccount(acc.id)}>
+            {acc.name || acc.nickname || `Account ${acc.id}`}
+            {acc.accountType && <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 6 }}>{acc.accountType}</span>}
+          </button>
+        ))}
+      </div>
+    </div>}
+
+    {/* Actions */}
+    {selectedAccount && <div className="section">
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn btn--ghost" onClick={runPreview} disabled={loading === 'preview'}>
+          {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview Trades
+        </button>
+        <button className="btn btn--primary" onClick={runSync} disabled={loading === 'sync'}>
+          {loading === 'sync' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import Now
+        </button>
+      </div>
+      <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
+        Preview shows what would be imported without writing anything. Import is idempotent — re-running it won't create duplicates.
+      </p>
+    </div>}
+
+    {/* Preview results */}
+    {preview && <div className="section">
+      <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs found</span></div>
+      {preview.fill_pair_count === 0
+        ? <div className="empty-state" style={{ padding: 20 }}>
+            <p>No fill pairs returned. This can happen if:</p>
+            <ul style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8, paddingLeft: 20 }}>
+              <li>The account has no closed trades yet</li>
+              <li>The API requires a WebSocket <code>user/syncrequest</code> to be triggered first — open Tradovate in your browser to sync the session, then retry</li>
+              <li>Your API subscription is not active</li>
+            </ul>
+          </div>
+        : <div className="trade-table-wrap"><table className="trade-table"><thead><tr>
+            <th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Entry Time</th>
+          </tr></thead><tbody>
+            {(preview.preview || []).map((r, i) => (
+              <tr key={i}>
+                <td>{r.trade_date}</td>
+                <td style={{ fontWeight: 500 }}>{r.symbol}</td>
+                <td style={{ color: r.side === 'Long' ? 'var(--green)' : 'var(--red)' }}>{r.side}</td>
+                <td>{r.qty}</td>
+                <td className="mono">{r.entry_price != null ? r.entry_price.toFixed(2) : '—'}</td>
+                <td className="mono">{r.exit_price != null ? r.exit_price.toFixed(2) : '—'}</td>
+                <td className={`mono ${pnlC(r.pnl)}`}>{r.pnl != null ? pnl$(r.pnl) : '—'}</td>
+                <td style={{ fontSize: 11, color: 'var(--text-3)' }}>{r.entry_time ? fmtTs(r.entry_time) : '—'}</td>
+              </tr>
+            ))}
+          </tbody></table></div>
+      }
+      {preview.raw_sample && <details style={{ marginTop: 12 }}>
+        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw API response sample (first 3)</summary>
+        <pre style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6 }}>{JSON.stringify(preview.raw_sample, null, 2)}</pre>
+      </details>}
+    </div>}
+
+    {/* Sync result */}
+    {syncResult && <div className="section">
+      <div className="section__head"><span className="section__title">Sync Result</span></div>
+      <div className="stat-grid">
+        <div className="stat-card"><div className="stat-card__label">Imported</div><div className="stat-card__value positive">{syncResult.imported}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Skipped (already exists)</div><div className="stat-card__value">{syncResult.skipped}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Days Updated</div><div className="stat-card__value">{syncResult.days_updated}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Errors</div><div className={`stat-card__value ${syncResult.errors?.length ? 'negative' : ''}`}>{syncResult.errors?.length || 0}</div></div>
+      </div>
+      {syncResult.message && <p style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8 }}>{syncResult.message}</p>}
+      {syncResult.errors?.length > 0 && <div style={{ marginTop: 12 }}>
+        <p style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 6 }}>Errors:</p>
+        {syncResult.errors.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--text-3)', padding: '3px 0' }}>{e}</div>)}
+      </div>}
+      {syncResult.imported > 0 && <button className="btn btn--primary" style={{ marginTop: 16 }} onClick={() => onOpenDay && window.location.reload()}>
+        Go to Trade Days →
+      </button>}
+    </div>}
+  </>;
 }
 
 // ── Day Analyses Tab — shows linked analyze sessions ──────

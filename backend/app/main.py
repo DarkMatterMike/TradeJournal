@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from .db import get_conn, init_db
 from .storage import R2Storage
 from .ai import analyze_chart_image_bytes, summarize_day, embed_text, has_ai, generate_recommendation
+from . import tradovate as tv
 
 load_dotenv()
 
@@ -143,12 +144,34 @@ def dashboard_stats():
             FROM playbook_patterns p WHERE p.sample_count > 0
             ORDER BY p.sample_count DESC LIMIT 10''')
         top_patterns = cur.fetchall()
-        cur.execute('SELECT * FROM trading_days ORDER BY trade_date DESC LIMIT 5')
+        cur.execute('SELECT * FROM trading_days ORDER BY trade_date DESC LIMIT 10')
         recent = cur.fetchall()
         return {'overview': overview, 'top_patterns': top_patterns, 'recent_days': recent}
 
-@app.get('/days')
-def list_days(q: str = '', limit: int = 200):
+@app.get('/calendar')
+def calendar_data(year: int = None, month: int = None):
+    """Return trading day summaries for a calendar view.
+    If year/month omitted, returns the last 13 months.
+    Returns one row per trading day with just the fields needed for heatmap rendering.
+    """
+    with get_conn() as conn, conn.cursor() as cur:
+        if year and month:
+            cur.execute('''
+                SELECT id, trade_date, pnl, num_trades, win_count, loss_count,
+                       execution_score, ai_pattern_tags, tags, tickers
+                FROM trading_days
+                WHERE date_trunc('month', trade_date) = make_date(%s, %s, 1)
+                ORDER BY trade_date ASC
+            ''', (year, month))
+        else:
+            cur.execute('''
+                SELECT id, trade_date, pnl, num_trades, win_count, loss_count,
+                       execution_score, ai_pattern_tags, tags, tickers
+                FROM trading_days
+                WHERE trade_date >= (CURRENT_DATE - INTERVAL '13 months')
+                ORDER BY trade_date ASC
+            ''')
+        return cur.fetchall()(q: str = '', limit: int = 200):
     with get_conn() as conn, conn.cursor() as cur:
         if q:
             like = f'%{q}%'
@@ -612,6 +635,7 @@ async def analyze_screenshot(
     trade_date: str = Form(None),
     day_id: int = Form(None),
     notes: str = Form(''),
+    focus: str = Form(''),
     save_session: bool = Form(True),
 ):
     """Upload any chart screenshot for AI analysis.
@@ -619,6 +643,7 @@ async def analyze_screenshot(
     - trade_date: ISO date string to link to a trading day (auto-resolves day_id)
     - day_id: explicit trading day FK (overrides trade_date resolution)
     - notes: freeform notes to attach to the session
+    - focus: optional free-text override injected into the AI prompt
     - save_session: set False to skip saving (one-off queries)
     """
     if not has_ai():
@@ -673,7 +698,7 @@ async def analyze_screenshot(
 
     # ── Step 2: Chart AI analysis ────────────────────
     try:
-        chart_analysis = analyze_chart_image_bytes(content, analysis_type, file.content_type or 'image/png')
+        chart_analysis = analyze_chart_image_bytes(content, analysis_type, file.content_type or 'image/png', focus=focus)
     except Exception as e:
         chart_analysis = {'error': f'Chart analysis failed: {e}'}
 
@@ -857,3 +882,77 @@ def update_analyze_session(session_id: int, payload: dict):
             raise HTTPException(404, 'Session not found')
         conn.commit()
         return row
+
+
+# ── Tradovate Sync ───────────────────────────────────
+
+@app.get('/tradovate/status')
+def tradovate_status():
+    """Check whether Tradovate credentials are configured and token is live."""
+    return tv.get_status()
+
+
+@app.get('/tradovate/accounts')
+def tradovate_accounts():
+    """List Tradovate accounts for the configured user."""
+    if not tv._has_credentials():
+        raise HTTPException(503, 'Tradovate credentials not configured.')
+    try:
+        accounts = tv.get_accounts()
+        return accounts
+    except Exception as e:
+        raise HTTPException(502, f'Tradovate API error: {e}')
+
+
+@app.get('/tradovate/balance/{account_id}')
+def tradovate_balance(account_id: int):
+    """Get current cash balance snapshot for a Tradovate account."""
+    if not tv._has_credentials():
+        raise HTTPException(503, 'Tradovate credentials not configured.')
+    try:
+        return tv.get_cash_balance(account_id)
+    except Exception as e:
+        raise HTTPException(502, f'Tradovate API error: {e}')
+
+
+@app.post('/tradovate/sync/{account_id}')
+def tradovate_sync(account_id: int):
+    """
+    Sync closed trades from Tradovate into the journal.
+    - Fetches fillPair/list for the account
+    - Creates trading_days for any new dates
+    - Inserts trade_rows for each fill pair
+    - Recomputes day-level P&L stats
+    - Skips fills already imported (idempotent)
+    """
+    if not tv._has_credentials():
+        raise HTTPException(503, 'Tradovate credentials not configured. Add TRADOVATE_USERNAME, TRADOVATE_PASSWORD, TRADOVATE_CID, TRADOVATE_SEC to your Railway environment variables.')
+    try:
+        result = tv.sync_fills_to_journal(account_id)
+        return result
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise HTTPException(502, f'Sync failed: {e}')
+
+
+@app.get('/tradovate/preview/{account_id}')
+def tradovate_preview(account_id: int):
+    """
+    Preview what would be imported without writing to the database.
+    Returns the raw fillPairs and mapped trade rows.
+    """
+    if not tv._has_credentials():
+        raise HTTPException(503, 'Tradovate credentials not configured.')
+    try:
+        fill_pairs = tv.get_fill_pairs(account_id)
+        contract_ids = [fp['contractId'] for fp in fill_pairs if fp.get('contractId')]
+        contracts = tv.get_contracts_by_ids(contract_ids)
+        rows = [tv._fill_pair_to_row(fp, contracts) for fp in fill_pairs]
+        return {
+            'fill_pair_count': len(fill_pairs),
+            'preview': rows[:50],
+            'raw_sample': fill_pairs[:3],  # First 3 raw for debugging
+        }
+    except Exception as e:
+        raise HTTPException(502, f'Preview failed: {e}')
