@@ -750,7 +750,7 @@ function App() {
 function TradovateSyncPage({ onOpenDay, setStatus }) {
   const [syncStatus, setSyncStatus] = useState(null);
   const [accounts, setAccounts] = useState([]);
-  const [selectedAccount, setSelectedAccount] = useState(null); // full account object
+  const [selectedAccount, setSelectedAccount] = useState(null);
   const [preview, setPreview] = useState(null);
   const [syncResult, setSyncResult] = useState(null);
   const [loading, setLoading] = useState('');
@@ -761,32 +761,21 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     try { setSyncStatus(await api('/tradovate/status')); } catch {}
   };
 
+  const accountLabel = (acc) => acc.name || acc.nickname || acc.accountSpec || `Account ${acc.id}`;
+
   const loadAccounts = async () => {
     setLoading('accounts');
     try {
       const accs = await api('/tradovate/accounts');
       setAccounts(accs);
-      if (accs.length === 1) setSelectedAccount(accs[0]); // store full object
+      if (accs.length === 1) setSelectedAccount(accs[0]);
     } catch (e) { setStatus('Failed: ' + e.message); }
-    finally { setLoading(''); }
-  };
-
-  const accountLabel = (acc) => acc.name || acc.nickname || acc.accountSpec || `Account ${acc.id}`;
-
-  const runWsSync = async () => {
-    setLoading('wssync');
-    try {
-      const result = await api('/tradovate/ws-sync', { method: 'POST', body: JSON.stringify({}) });
-      setStatus(`Session loaded — ${result.status}${result.entities?.length ? ' · entities: ' + result.entities.join(', ') : ''}`);
-      await loadStatus();
-    } catch (e) { setStatus('WS sync failed: ' + e.message); }
     finally { setLoading(''); }
   };
 
   const runPreview = async () => {
     if (!selectedAccount) return;
-    setLoading('preview');
-    setPreview(null);
+    setLoading('preview'); setPreview(null);
     try { setPreview(await api(`/tradovate/preview/${selectedAccount.id}`)); }
     catch (e) { setStatus('Preview failed: ' + e.message); }
     finally { setLoading(''); }
@@ -794,10 +783,8 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
 
   const runSync = async () => {
     if (!selectedAccount) return;
-    const label = accountLabel(selectedAccount);
-    if (!confirm(`Import all closed trades from Tradovate account ${label} into your journal?`)) return;
-    setLoading('sync');
-    setSyncResult(null);
+    if (!confirm(`Import all closed trades from Tradovate account ${accountLabel(selectedAccount)}?`)) return;
+    setLoading('sync'); setSyncResult(null);
     try {
       const result = await api(`/tradovate/sync/${selectedAccount.id}`, { method: 'POST', body: JSON.stringify({}) });
       setSyncResult(result);
@@ -806,51 +793,47 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     finally { setLoading(''); }
   };
 
-  const configured = syncStatus?.configured;
-  const connected = syncStatus?.connected;
+  const authorized = syncStatus?.authorized;
 
   return <>
     <div className="page-header">
       <h1 className="page-header__title">Tradovate Sync</h1>
-      <p className="page-header__sub">Auto-import closed trades from your live Tradovate account</p>
+      <p className="page-header__sub">Import your complete trade history via OAuth</p>
     </div>
 
-    {/* Connection status */}
     <div className="section">
-      <div className="section__head"><span className="section__title">Connection</span><button className="btn btn--ghost" style={{ fontSize: 12, padding: '4px 10px' }} onClick={loadStatus}>Refresh</button></div>
+      <div className="section__head">
+        <span className="section__title">Connection</span>
+        <button className="btn btn--ghost" style={{ fontSize: 12, padding: '4px 10px' }} onClick={loadStatus}>Refresh</button>
+      </div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div style={{ width: 10, height: 10, borderRadius: '50%', background: configured ? connected ? 'var(--green)' : 'var(--amber)' : 'var(--red)' }} />
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: authorized ? 'var(--green)' : 'var(--amber)' }} />
           <span style={{ fontSize: 13, color: 'var(--text-2)' }}>
-            {!configured ? 'Credentials not configured' : connected ? `Connected · token expires in ${Math.round((syncStatus.token_expires_in || 0) / 60)}m` : 'Credentials set, not yet connected'}
+            {authorized
+              ? `Connected · token expires in ${Math.round((syncStatus.token_expires_in || 0) / 60)}m`
+              : 'Not authorized'}
           </span>
         </div>
-        {configured && !connected && <button className="btn btn--primary" style={{ fontSize: 12 }} onClick={loadAccounts}>{loading === 'accounts' ? <Loader2 size={13} className="spin" /> : null} Connect & List Accounts</button>}
-        {connected && accounts.length === 0 && <button className="btn btn--ghost" style={{ fontSize: 12 }} onClick={loadAccounts}>List Accounts</button>}
+        {!authorized && (
+          <a href="/tradovate/oauth/start" target="_blank" rel="noopener noreferrer"
+            className="btn btn--primary" style={{ fontSize: 13, textDecoration: 'none' }}>
+            Connect Tradovate Account →
+          </a>
+        )}
+        {authorized && accounts.length === 0 && (
+          <button className="btn btn--ghost" onClick={loadAccounts} disabled={loading === 'accounts'}>
+            {loading === 'accounts' ? <Loader2 size={13} className="spin" /> : null} List Accounts
+          </button>
+        )}
       </div>
-
-      {!configured && <div style={{ marginTop: 16, padding: 16, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)' }}>
-        <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 8 }}>Add these to your Railway environment variables to enable sync:</p>
-        {[
-          ['TRADOVATE_USERNAME', 'Your Tradovate login email/username'],
-          ['TRADOVATE_PASSWORD', 'Your Tradovate password'],
-          ['TRADOVATE_CID', 'Client ID from API settings in your Tradovate account'],
-          ['TRADOVATE_SEC', 'Secret key from API settings'],
-          ['TRADOVATE_APP_ID', 'App name you registered (e.g. "TradeJournal")'],
-          ['TRADOVATE_APP_VERSION', '1.0'],
-        ].map(([k, v]) => (
-          <div key={k} style={{ display: 'flex', gap: 12, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
-            <code style={{ color: 'var(--accent)', minWidth: 220 }}>{k}</code>
-            <span style={{ color: 'var(--text-3)' }}>{v}</span>
-          </div>
-        ))}
-        <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 12 }}>
-          To get your CID and SEC: Log into Tradovate → top-right menu → API Access → generate an API key. Requires live account with API Access subscription (~$10/mo from Tradovate).
+      {authorized && accounts.length === 0 && (
+        <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
+          Connected! Click <strong>List Accounts</strong> then select your account to import.
         </p>
-      </div>}
+      )}
     </div>
 
-    {/* Account selector */}
     {accounts.length > 0 && <div className="section">
       <div className="section__head"><span className="section__title">Account</span></div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -864,9 +847,8 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
       </div>
     </div>}
 
-    {/* Actions */}
     {selectedAccount && <div className="section">
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8 }}>
         <button className="btn btn--ghost" onClick={runPreview} disabled={!!loading}>
           {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview Trades
         </button>
@@ -874,98 +856,58 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
           {loading === 'sync' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import Now
         </button>
       </div>
-      <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
-        Connects directly via WebSocket and collects your full trade history. Preview first, then import. Import is idempotent — safe to re-run.
-      </p>
+      <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>Preview first. Import is idempotent — safe to re-run.</p>
     </div>}
 
-    {/* Preview results */}
     {preview && <div className="section">
       <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs</span></div>
-
-      {/* Phase breakdown */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
-        <div style={{ padding: 12, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-2)' }}>WebSocket Phase</div>
-          {preview.ws_phase?.error && <div style={{ color: 'var(--red)', marginBottom: 4 }}>Error: {preview.ws_phase.error}</div>}
-          {Object.entries(preview.ws_phase?.entity_counts || {}).map(([k, v]) => (
-            <div key={k} style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</div>
-          ))}
-        </div>
-        <div style={{ padding: 12, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12 }}>
-          <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-2)' }}>REST Phase (order/deps chain)</div>
-          {preview.rest_phase?.error && <div style={{ color: 'var(--red)', marginBottom: 4 }}>Error: {preview.rest_phase.error}</div>}
-          <div style={{ color: 'var(--text-2)' }}>Orders found: {preview.rest_phase?.orders_found ?? '—'}</div>
-          {Object.entries(preview.rest_phase?.entity_counts || {}).map(([k, v]) => (
-            <div key={k} style={{ color: v > 0 ? 'var(--green)' : 'var(--text-3)' }}>{k}: {v}</div>
-          ))}
-        </div>
+      <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        {Object.entries(preview.counts || {}).map(([k, v]) => (
+          <span key={k}><code style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</code></span>
+        ))}
       </div>
+      {preview.errors?.length > 0 && <div style={{ marginBottom: 12 }}>
+        {preview.errors.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--amber)' }}>{e}</div>)}
+      </div>}
       {preview.fill_pair_count === 0
-        ? <div className="empty-state" style={{ padding: 20 }}>
-            <p>No fill pairs returned. This can happen if:</p>
-            <ul style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8, paddingLeft: 20 }}>
-              <li>The account has no closed trades yet</li>
-              <li>The API requires a WebSocket <code>user/syncrequest</code> to be triggered first — open Tradovate in your browser to sync the session, then retry</li>
-              <li>Your API subscription is not active</li>
-            </ul>
-          </div>
+        ? <div className="empty-state" style={{ padding: 20 }}><p>No fill pairs returned yet.</p></div>
         : <div className="trade-table-wrap"><table className="trade-table"><thead><tr>
-            <th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Entry Time</th>
+            <th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th>
           </tr></thead><tbody>
             {(preview.preview || []).map((r, i) => (
               <tr key={i}>
-                <td>{r.trade_date}</td>
+                <td>{r.trade_date || '—'}</td>
                 <td style={{ fontWeight: 500 }}>{r.symbol}</td>
                 <td style={{ color: r.side === 'Long' ? 'var(--green)' : 'var(--red)' }}>{r.side}</td>
                 <td>{r.qty}</td>
                 <td className="mono">{r.entry_price != null ? r.entry_price.toFixed(2) : '—'}</td>
                 <td className="mono">{r.exit_price != null ? r.exit_price.toFixed(2) : '—'}</td>
                 <td className={`mono ${pnlC(r.pnl)}`}>{r.pnl != null ? pnl$(r.pnl) : '—'}</td>
-                <td style={{ fontSize: 11, color: 'var(--text-3)' }}>{r.entry_time ? fmtTs(r.entry_time) : '—'}</td>
               </tr>
             ))}
           </tbody></table></div>
       }
-      {(preview.rest_phase?.raw_order_sample?.length > 0 || preview.rest_phase?.raw_fill_sample?.length > 0) && <details style={{ marginTop: 12 }}>
-        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw REST samples</summary>
+      {preview.raw_fillpair?.length > 0 && <details style={{ marginTop: 12 }}>
+        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw API response</summary>
         <pre style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6 }}>
-          {JSON.stringify({
-            orders: preview.rest_phase?.raw_order_sample,
-            fills: preview.rest_phase?.raw_fill_sample,
-            fillPairs: preview.rest_phase?.raw_fillpair_sample,
-          }, null, 2)}
+          {JSON.stringify({ fillPairs: preview.raw_fillpair, fills: preview.raw_fill }, null, 2)}
         </pre>
       </details>}
     </div>}
 
-    {/* Sync result */}
     {syncResult && <div className="section">
       <div className="section__head"><span className="section__title">Sync Result</span></div>
       <div className="stat-grid">
         <div className="stat-card"><div className="stat-card__label">Imported</div><div className="stat-card__value positive">{syncResult.imported}</div></div>
-        <div className="stat-card"><div className="stat-card__label">Skipped (already exists)</div><div className="stat-card__value">{syncResult.skipped}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Skipped</div><div className="stat-card__value">{syncResult.skipped}</div></div>
         <div className="stat-card"><div className="stat-card__label">Days Updated</div><div className="stat-card__value">{syncResult.days_updated}</div></div>
         <div className="stat-card"><div className="stat-card__label">Errors</div><div className={`stat-card__value ${syncResult.errors?.length ? 'negative' : ''}`}>{syncResult.errors?.length || 0}</div></div>
       </div>
       {syncResult.message && <p style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8 }}>{syncResult.message}</p>}
-      {syncResult.entity_counts && <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-        {Object.entries(syncResult.entity_counts).map(([k, v]) => (
-          <span key={k}><code style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</code></span>
-        ))}
-      </div>}
-      {syncResult.errors?.length > 0 && <div style={{ marginTop: 12 }}>
-        <p style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 6 }}>Errors:</p>
-        {syncResult.errors.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--text-3)', padding: '3px 0' }}>{e}</div>)}
-      </div>}
-      {syncResult.imported > 0 && <button className="btn btn--primary" style={{ marginTop: 16 }} onClick={() => onOpenDay && window.location.reload()}>
-        Go to Trade Days →
-      </button>}
+      {syncResult.errors?.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--amber)', marginTop: 4 }}>{e}</div>)}
     </div>}
   </>;
 }
-
-// ── Day Analyses Tab — shows linked analyze sessions ──────
 function DayAnalysesTab({ dayId, onOpenDay, setStatus }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);

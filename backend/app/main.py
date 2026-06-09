@@ -887,17 +887,50 @@ def update_analyze_session(session_id: int, payload: dict):
         return row
 
 
-# ── Tradovate Sync ───────────────────────────────────
+# ── Tradovate OAuth ───────────────────────────────────
 
 @app.get('/tradovate/status')
 def tradovate_status():
     return tv.get_status()
 
 
+@app.get('/tradovate/oauth/start')
+def tradovate_oauth_start():
+    """Redirect browser to Tradovate authorization page."""
+    from fastapi.responses import RedirectResponse
+    if not tv._has_oauth_config():
+        raise HTTPException(503, 'Add TRADOVATE_CLIENT_ID and TRADOVATE_CLIENT_SECRET to Railway env vars.')
+    return RedirectResponse(tv.build_auth_url())
+
+
+@app.get('/tradovate/oauth/callback')
+def tradovate_oauth_callback(code: str = None, error: str = None, state: str = None):
+    """Tradovate redirects here after user authorizes."""
+    from fastapi.responses import HTMLResponse
+    if error:
+        return HTMLResponse(f'''<html><body style="font-family:sans-serif;padding:40px;background:#0d1117;color:#e6edf3">
+            <h2 style="color:#f85149">Authorization Failed</h2><p>{error}</p>
+            <p><a href="/tradovate/oauth/start" style="color:#58a6ff">Try again</a></p></body></html>''')
+    if not code:
+        raise HTTPException(400, 'No authorization code received.')
+    try:
+        token_data = tv.exchange_code_for_token(code)
+        return HTMLResponse(f'''<html><body style="font-family:sans-serif;padding:40px;background:#0d1117;color:#e6edf3">
+            <h2 style="color:#3fb950">&#10003; Tradovate Connected!</h2>
+            <p>Your account is now authorized. Return to the journal and click <strong>List Accounts</strong> then <strong>Import Now</strong>.</p>
+            <p style="color:#8b949e;font-size:13px">You can close this tab.</p>
+            <script>setTimeout(()=>{{try{{window.close();}}catch(e){{}}}}, 3000);</script>
+            </body></html>''')
+    except Exception as e:
+        return HTMLResponse(f'''<html><body style="font-family:sans-serif;padding:40px;background:#0d1117;color:#e6edf3">
+            <h2 style="color:#f85149">Token Exchange Failed</h2><p>{e}</p>
+            <p><a href="/tradovate/oauth/start" style="color:#58a6ff">Try again</a></p></body></html>''', status_code=500)
+
+
 @app.get('/tradovate/accounts')
 def tradovate_accounts():
-    if not tv._has_credentials():
-        raise HTTPException(503, 'Tradovate credentials not configured.')
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized. Visit /tradovate/oauth/start first.')
     try:
         return tv.get_accounts()
     except Exception as e:
@@ -906,151 +939,50 @@ def tradovate_accounts():
 
 @app.get('/tradovate/balance/{account_id}')
 def tradovate_balance(account_id: int):
-    if not tv._has_credentials():
-        raise HTTPException(503, 'Tradovate credentials not configured.')
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized.')
     try:
         return tv.get_cash_balance(account_id)
     except Exception as e:
         raise HTTPException(502, f'Tradovate API error: {e}')
 
 
-@app.post('/tradovate/sync/{account_id}')
-async def tradovate_sync(account_id: int):
-    """
-    Full WebSocket sync: connects, sends user/syncrequest, collects ALL entity
-    data from the response (fillPairs, fills, contracts), maps and imports.
-    Idempotent — safe to re-run.
-    """
-    if not tv._has_credentials():
-        raise HTTPException(503, 'Tradovate credentials not configured.')
-    try:
-        entities = await tv._fetch_entities_async(timeout=40, account_id=account_id)
-
-        fill_pairs      = entities.get('fillPairs', [])
-        fills           = entities.get('fills', [])
-        contracts       = entities.get('contracts', [])
-
-        if not fill_pairs:
-            return {
-                'imported': 0, 'skipped': 0, 'days_updated': 0, 'errors': [],
-                'entity_counts': {k: len(v) for k, v in entities.items()},
-                'message': f'No fillPairs in WebSocket response. Entities: { {k: len(v) for k, v in entities.items()} }',
-            }
-
-        fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
-        contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
-
-        imported = 0; skipped = 0; errors = []; days_touched = set()
-
-        with get_conn() as conn, conn.cursor() as cur:
-            for fp in fill_pairs:
-                try:
-                    row_data     = tv._map_fill_pair(fp, fills_by_id, contracts_by_id)
-                    trade_date   = row_data.get('trade_date')
-                    fill_pair_id = row_data.get('tradovate_fill_pair_id')
-                    if not fill_pair_id:
-                        skipped += 1; continue
-                    cur.execute("SELECT id FROM trade_rows WHERE row_data->>'tradovate_fill_pair_id' = %s", (str(fill_pair_id),))
-                    if cur.fetchone():
-                        skipped += 1; continue
-                    day_id = None
-                    if trade_date:
-                        cur.execute('SELECT id FROM trading_days WHERE trade_date = %s', (trade_date,))
-                        day_row = cur.fetchone()
-                        if not day_row:
-                            cur.execute('INSERT INTO trading_days (trade_date,tickers,title) VALUES (%s,%s,%s) ON CONFLICT (trade_date) DO NOTHING RETURNING id',
-                                        (trade_date, row_data.get('symbol',''), f'Auto-imported {trade_date}'))
-                            day_row = cur.fetchone()
-                            if not day_row:
-                                cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (trade_date,))
-                                day_row = cur.fetchone()
-                        if day_row:
-                            day_id = day_row['id']
-                    cur.execute('INSERT INTO trade_rows (day_id,row_data) VALUES (%s,%s)', (day_id, Json(row_data)))
-                    if day_id:
-                        days_touched.add((day_id, trade_date))
-                    imported += 1
-                except Exception as e:
-                    errors.append(f'fillPair {fp.get("id")}: {e}')
-
-            for day_id, _ in days_touched:
-                tv._recompute_day_stats(cur, day_id)
-            conn.commit()
-
-        return {'imported': imported, 'skipped': skipped, 'days_updated': len(days_touched),
-                'errors': errors, 'entity_counts': {k: len(v) for k, v in entities.items()}}
-
-    except RuntimeError as e:
-        raise HTTPException(503, str(e))
-    except Exception as e:
-        raise HTTPException(502, f'Sync failed: {e}')
-
-
 @app.get('/tradovate/preview/{account_id}')
-async def tradovate_preview(account_id: int):
-    """
-    Preview via WebSocket — same as sync but writes nothing.
-    """
-    if not tv._has_credentials():
-        raise HTTPException(503, 'Tradovate credentials not configured.')
+def tradovate_preview(account_id: int):
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized. Visit /tradovate/oauth/start first.')
     try:
-        # Run each phase explicitly so we can report what each one returned
-        import websockets
-
-        ws_entities: dict = {}
-        rest_entities: dict = {}
-        ws_error = None
-        rest_error = None
-
-        # ── Phase 1: WebSocket ──────────────────────────────────────────────
-        try:
-            ws_entities = await tv._run_ws_sync(account_id)
-        except Exception as e:
-            ws_error = str(e)
-
-        # ── Phase 2: REST order chain — always run in preview for diagnostics
-        try:
-            rest_entities = await tv._fetch_fills_via_rest(account_id)
-        except Exception as e:
-            rest_error = str(e)
-
-        # Merge: REST wins for fills/fillPairs if WS came up empty
-        merged = dict(ws_entities)
-        for k, v in rest_entities.items():
-            if k not in merged or not merged[k]:
-                merged[k] = v
-
-        fill_pairs      = merged.get('fillPairs', [])
-        fills           = merged.get('fills', [])
-        contracts       = merged.get('contracts', [])
+        data = tv.fetch_fill_pairs(account_id)
+        fill_pairs      = data.get('fillPairs', [])
+        fills           = data.get('fills', [])
+        contracts       = data.get('contracts', [])
         fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
         contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
-
         rows = []
         for fp in fill_pairs:
             try:
                 rows.append(tv._map_fill_pair(fp, fills_by_id, contracts_by_id))
             except Exception as e:
-                rows.append({'error': str(e), '_raw_fp': fp})
-
+                rows.append({'error': str(e), '_raw': fp})
         return {
-            'ws_phase':  {
-                'entity_counts': {k: len(v) for k, v in ws_entities.items()},
-                'error': ws_error,
-            },
-            'rest_phase': {
-                'entity_counts': {k: len(v) for k, v in rest_entities.items()},
-                'error': rest_error,
-                'orders_found': len(rest_entities.get('orders', [])),
-                'raw_order_sample': rest_entities.get('orders', [])[:2],
-                'raw_fill_sample':  rest_entities.get('fills', [])[:2],
-                'raw_fillpair_sample': rest_entities.get('fillPairs', [])[:2],
-            },
-            'merged_entity_counts': {k: len(v) for k, v in merged.items()},
+            'counts': {k: len(v) for k, v in data.items() if isinstance(v, list)},
             'fill_pair_count': len(fill_pairs),
-            'preview':    rows[:50],
+            'errors': data.get('_errors', []),
+            'preview': rows[:50],
+            'raw_fillpair': fill_pairs[:3],
+            'raw_fill': fills[:2],
         }
+    except Exception as e:
+        raise HTTPException(502, f'Preview failed: {e}')
+
+
+@app.post('/tradovate/sync/{account_id}')
+def tradovate_sync(account_id: int):
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized. Visit /tradovate/oauth/start first.')
+    try:
+        return tv.sync_fills_to_journal(account_id)
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:
-        raise HTTPException(502, f'Preview failed: {e}')
+        raise HTTPException(502, f'Sync failed: {e}')
