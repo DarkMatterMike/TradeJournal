@@ -915,17 +915,71 @@ def tradovate_balance(account_id: int):
 
 
 @app.post('/tradovate/sync/{account_id}')
-def tradovate_sync(account_id: int):
+async def tradovate_sync(account_id: int):
     """
     Full WebSocket sync: connects, sends user/syncrequest, collects ALL entity
-    data from the response (fillPairs, fills, contracts), then maps and imports
-    into the journal. No REST calls for trade data. Idempotent.
+    data from the response (fillPairs, fills, contracts), maps and imports.
+    Idempotent — safe to re-run.
     """
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        result = tv.sync_fills_to_journal(account_id)
-        return result
+        entities = await tv._fetch_entities_async(timeout=40)
+
+        fill_pairs      = entities.get('fillPairs', [])
+        fills           = entities.get('fills', [])
+        contracts       = entities.get('contracts', [])
+
+        if not fill_pairs:
+            return {
+                'imported': 0, 'skipped': 0, 'days_updated': 0, 'errors': [],
+                'entity_counts': {k: len(v) for k, v in entities.items()},
+                'message': f'No fillPairs in WebSocket response. Entities: { {k: len(v) for k, v in entities.items()} }',
+            }
+
+        fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
+        contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
+
+        imported = 0; skipped = 0; errors = []; days_touched = set()
+
+        with get_conn() as conn, conn.cursor() as cur:
+            for fp in fill_pairs:
+                try:
+                    row_data     = tv._map_fill_pair(fp, fills_by_id, contracts_by_id)
+                    trade_date   = row_data.get('trade_date')
+                    fill_pair_id = row_data.get('tradovate_fill_pair_id')
+                    if not fill_pair_id:
+                        skipped += 1; continue
+                    cur.execute("SELECT id FROM trade_rows WHERE row_data->>'tradovate_fill_pair_id' = %s", (str(fill_pair_id),))
+                    if cur.fetchone():
+                        skipped += 1; continue
+                    day_id = None
+                    if trade_date:
+                        cur.execute('SELECT id FROM trading_days WHERE trade_date = %s', (trade_date,))
+                        day_row = cur.fetchone()
+                        if not day_row:
+                            cur.execute('INSERT INTO trading_days (trade_date,tickers,title) VALUES (%s,%s,%s) ON CONFLICT (trade_date) DO NOTHING RETURNING id',
+                                        (trade_date, row_data.get('symbol',''), f'Auto-imported {trade_date}'))
+                            day_row = cur.fetchone()
+                            if not day_row:
+                                cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (trade_date,))
+                                day_row = cur.fetchone()
+                        if day_row:
+                            day_id = day_row['id']
+                    cur.execute('INSERT INTO trade_rows (day_id,row_data) VALUES (%s,%s)', (day_id, Json(row_data)))
+                    if day_id:
+                        days_touched.add((day_id, trade_date))
+                    imported += 1
+                except Exception as e:
+                    errors.append(f'fillPair {fp.get("id")}: {e}')
+
+            for day_id, _ in days_touched:
+                tv._recompute_day_stats(cur, day_id)
+            conn.commit()
+
+        return {'imported': imported, 'skipped': skipped, 'days_updated': len(days_touched),
+                'errors': errors, 'entity_counts': {k: len(v) for k, v in entities.items()}}
+
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:
@@ -933,15 +987,36 @@ def tradovate_sync(account_id: int):
 
 
 @app.get('/tradovate/preview/{account_id}')
-def tradovate_preview(account_id: int):
+async def tradovate_preview(account_id: int):
     """
-    Preview via WebSocket: same as sync but writes nothing.
-    Shows entity counts, mapped trade rows, and raw samples.
+    Preview via WebSocket — same as sync but writes nothing.
     """
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        return tv.preview_fills(account_id)
+        entities = await tv._fetch_entities_async(timeout=40)
+
+        fill_pairs      = entities.get('fillPairs', [])
+        fills           = entities.get('fills', [])
+        contracts       = entities.get('contracts', [])
+        fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
+        contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
+
+        rows = []
+        for fp in fill_pairs:
+            try:
+                rows.append(tv._map_fill_pair(fp, fills_by_id, contracts_by_id))
+            except Exception as e:
+                rows.append({'error': str(e), '_raw_fp': fp})
+
+        return {
+            'entity_counts':       {k: len(v) for k, v in entities.items()},
+            'fill_pair_count':      len(fill_pairs),
+            'preview':              rows[:50],
+            'raw_fill_pair_sample': fill_pairs[:2],
+            'raw_fill_sample':      fills[:2],
+            'raw_contract_sample':  contracts[:1],
+        }
     except RuntimeError as e:
         raise HTTPException(503, str(e))
     except Exception as e:
