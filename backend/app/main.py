@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from .db import get_conn, init_db
 from .storage import R2Storage
-from .ai import analyze_chart_image_bytes, summarize_day, embed_text, has_ai
+from .ai import analyze_chart_image_bytes, summarize_day, embed_text, has_ai, generate_recommendation
 
 load_dotenv()
 
@@ -554,3 +554,110 @@ def link_pattern(day_id: int, pattern_id: int, payload: dict = None):
         row = cur.fetchone()
         conn.commit()
         return row
+
+# ── Pattern CRUD ─────────────────────────────────────
+
+@app.put('/patterns/{pattern_id}')
+def update_pattern(pattern_id: int, payload: dict):
+    allowed = ['name', 'description', 'rules', 'tags']
+    sets = []
+    vals = {'id': pattern_id}
+    for k in allowed:
+        if k in payload:
+            sets.append(f'{k}=%({k})s')
+            vals[k] = payload[k]
+    if not sets:
+        raise HTTPException(400, 'No fields to update')
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"UPDATE playbook_patterns SET {', '.join(sets)}, updated_at=NOW() WHERE id=%(id)s RETURNING *", vals)
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(404, 'Pattern not found')
+        conn.commit()
+        return row
+
+@app.delete('/patterns/{pattern_id}')
+def delete_pattern(pattern_id: int):
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('SELECT id FROM playbook_patterns WHERE id=%s', (pattern_id,))
+        if not cur.fetchone():
+            raise HTTPException(404, 'Pattern not found')
+        cur.execute('DELETE FROM playbook_patterns WHERE id=%s', (pattern_id,))
+        conn.commit()
+        return {'deleted': pattern_id}
+
+# ── Personal Trading AI: Standalone Analysis ─────────
+
+@app.post('/analyze')
+async def analyze_premarket(file: UploadFile = File(...)):
+    """Upload a premarket screenshot without creating a day.
+    Returns chart analysis, similar days, aggregated stats, and a recommendation."""
+    if not has_ai():
+        raise HTTPException(503, 'AI is not configured. Set OPENAI_API_KEY.')
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, 'Empty file')
+
+    # Step 1: Analyze the chart
+    chart_analysis = analyze_chart_image_bytes(content, 'premarket', file.content_type or 'image/png')
+
+    # Step 2: Embed the analysis to find similar days
+    analysis_text = json.dumps(chart_analysis, default=str)
+    emb = embed_text(analysis_text)
+
+    similar_days = []
+    stats = {}
+
+    if emb:
+        with get_conn() as conn, conn.cursor() as cur:
+            # Step 3: Find similar days by vector distance
+            cur.execute('''SELECT e.day_id, d.*,
+                MAX(1 - (e.embedding <=> %s::vector)) AS similarity
+                FROM ai_embeddings e JOIN trading_days d ON d.id = e.day_id
+                GROUP BY e.day_id, d.id
+                ORDER BY similarity DESC LIMIT 15''', (emb,))
+            similar_days = cur.fetchall()
+
+            # Step 4: Aggregate stats from similar days
+            if similar_days:
+                day_ids = [d['id'] for d in similar_days]
+                cur.execute('''SELECT
+                    COUNT(*) as total,
+                    AVG(pnl) as avg_pnl,
+                    SUM(pnl) as total_pnl,
+                    AVG(execution_score) as avg_score,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                    AVG(CASE WHEN pnl > 0 THEN 1.0 WHEN pnl < 0 THEN 0.0 ELSE NULL END) as win_rate
+                    FROM trading_days WHERE id = ANY(%s) AND pnl IS NOT NULL''', (day_ids,))
+                stats = cur.fetchone() or {}
+
+                # Get common patterns
+                cur.execute('''SELECT p.name, COUNT(*) as cnt
+                    FROM day_pattern_links dpl
+                    JOIN playbook_patterns p ON p.id = dpl.pattern_id
+                    WHERE dpl.day_id = ANY(%s)
+                    GROUP BY p.name ORDER BY cnt DESC LIMIT 5''', (day_ids,))
+                stats['common_patterns'] = cur.fetchall()
+
+    # Step 5: Generate AI recommendation
+    recommendation = generate_recommendation(chart_analysis, similar_days)
+
+    return {
+        'chart_analysis': chart_analysis,
+        'similar_days': [{
+            'trade_date': str(d.get('trade_date', '')),
+            'title': d.get('title', ''),
+            'tickers': d.get('tickers', ''),
+            'pnl': d.get('pnl'),
+            'ai_summary': d.get('ai_summary', ''),
+            'ai_pattern_tags': d.get('ai_pattern_tags', ''),
+            'execution_score': d.get('execution_score'),
+            'lessons': d.get('lessons', ''),
+            'biggest_mistake': d.get('biggest_mistake', ''),
+            'similarity': float(d.get('similarity', 0)),
+        } for d in similar_days],
+        'stats': stats,
+        'recommendation': recommendation,
+    }

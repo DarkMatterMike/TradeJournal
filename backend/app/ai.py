@@ -121,3 +121,53 @@ def embed_text(text: str) -> List[float] | None:
         return None
     resp = client.embeddings.create(model='text-embedding-3-small', input=text[:12000])
     return resp.data[0].embedding
+
+# ── Personal Trading AI Recommendation ─────────────
+RECOMMEND_PROMPT = """You are a personal trading AI advisor. The trader has uploaded today's premarket chart.
+You have the AI analysis of the chart AND data from their most similar historical trading days.
+
+Based on this data, return ONLY a JSON object with EXACTLY these fields:
+
+{{
+  "times_seen": <number of similar days provided>,
+  "avg_result": <average P&L from similar days, or null>,
+  "win_rate": <win rate across similar days as decimal, or null>,
+  "best_strategy": "the strategy that worked best on similar days, based on their notes and results",
+  "most_common_mistake": "the most common mistake from similar days' lessons and AI reviews",
+  "recommendation": "2-3 sentence specific actionable recommendation for today based on what happened on similar days. Reference specific patterns and outcomes.",
+  "risk_level": "low | moderate | high | very_high",
+  "key_levels_to_watch": ["list of levels from chart analysis"],
+  "pattern_summary": "what pattern type this chart structure most resembles based on the history"
+}}
+
+Be specific and reference the actual data. Don't be generic."""
+
+def generate_recommendation(chart_analysis: dict, similar_days: list) -> Dict[str, Any]:
+    if not client:
+        return {'recommendation': 'AI disabled. Add OPENAI_API_KEY.', 'times_seen': 0}
+    payload = {
+        'chart_analysis': chart_analysis,
+        'similar_days': [{
+            'trade_date': str(d.get('trade_date', '')),
+            'pnl': d.get('pnl'),
+            'strategy': d.get('strategy', ''),
+            'tickers': d.get('tickers', ''),
+            'lessons': d.get('lessons', ''),
+            'biggest_mistake': d.get('biggest_mistake', ''),
+            'biggest_strength': d.get('biggest_strength', ''),
+            'ai_summary': d.get('ai_summary', ''),
+            'ai_pattern_tags': d.get('ai_pattern_tags', ''),
+            'execution_score': d.get('execution_score'),
+            'trade_notes': d.get('trade_notes', ''),
+        } for d in similar_days[:15]]
+    }
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[
+            {'role': 'system', 'content': RECOMMEND_PROMPT},
+            {'role': 'user', 'content': json.dumps(payload, default=str)[:60000]}
+        ],
+        response_format={'type': 'json_object'},
+        temperature=0.3,
+    )
+    return _safe_json(resp.choices[0].message.content or '{}')

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Upload, Brain, Link2, Save, Search, Plus, ChevronRight, ChevronLeft, Sparkles, FileText, BarChart3, Tag, X, Loader2, ArrowUpRight, Trash2, TrendingUp, TrendingDown, Filter, Home, Calendar, Layers, Activity } from 'lucide-react';
+import { Upload, Brain, Link2, Save, Search, Plus, ChevronRight, ChevronLeft, Sparkles, FileText, BarChart3, Tag, X, Loader2, ArrowUpRight, Trash2, TrendingUp, TrendingDown, Filter, Home, Calendar, Layers, Activity, Zap, Pencil, Check } from 'lucide-react';
 import './style.css';
 
 const API = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
@@ -56,6 +56,9 @@ function App() {
   const [queryFilters, setQueryFilters] = useState({ pattern: '', outcome: '', ticker: '', sort: 'date' });
   const [queryResult, setQueryResult] = useState(null);
   const [q, setQ] = useState('');
+  const [analyzeResult, setAnalyzeResult] = useState(null);
+  const [editingPattern, setEditingPattern] = useState(null);
+  const [patternDraft, setPatternDraft] = useState({});
 
   function emptyDraft() { return { trade_date: new Date().toISOString().slice(0, 10), title: '', tickers: '', strategy: '', session: '', market_bias: '', premarket_notes: '', trade_notes: '', ideal_notes: '', lessons: '', tags: '', mood: '', pnl: null, num_trades: null, win_count: null, loss_count: null }; }
   const d = (k, v) => setDraft({ ...draft, [k]: v });
@@ -87,6 +90,34 @@ function App() {
   const deleteDay = async () => { if (!selected || !confirm('Delete this day and all data?')) return; try { await api(`/days/${selected}`, { method: 'DELETE' }); setSelected(null); setBundle(null); setPage('days'); await load(); await loadStats(); setStatus('Deleted'); } catch (e) { setStatus('Failed: ' + e.message); } };
   const runQuery = async () => { try { setStatus('Querying...'); const p = new URLSearchParams(); Object.entries(queryFilters).forEach(([k, v]) => { if (v) p.set(k, v); }); const r = await api('/query?' + p.toString()); setQueryResult(r); setStatus(`Found ${r.days.length} days`); } catch (e) { setStatus('Failed: ' + e.message); } };
 
+  const analyzePremarket = async (file) => {
+    if (!file) return;
+    try {
+      setStatus('Analyzing premarket...');
+      setAnalyzeResult(null);
+      const fd = new FormData(); fd.append('file', file);
+      const result = await api('/analyze', { method: 'POST', body: fd });
+      setAnalyzeResult(result);
+      setStatus('Analysis complete');
+    } catch (e) { setStatus('Analysis failed: ' + e.message); }
+  };
+
+  const savePattern = async (id) => {
+    try {
+      await api('/patterns/' + id, { method: 'PUT', body: JSON.stringify(patternDraft) });
+      setEditingPattern(null); await loadPatterns(); setStatus('Pattern saved');
+    } catch (e) { setStatus('Failed: ' + e.message); }
+  };
+  const deletePattern = async (id) => {
+    if (!confirm('Delete this pattern?')) return;
+    try { await api('/patterns/' + id, { method: 'DELETE' }); await loadPatterns(); setStatus('Pattern deleted'); } catch (e) { setStatus('Failed: ' + e.message); }
+  };
+  const createNewPattern = async () => {
+    const name = prompt('Pattern name:');
+    if (!name) return;
+    try { await api('/patterns', { method: 'POST', body: JSON.stringify({ name, description: '' }) }); await loadPatterns(); setStatus('Pattern created'); } catch (e) { setStatus('Failed: ' + e.message); }
+  };
+
   const newDay = () => { setSelected(null); setBundle(null); setDraft(emptyDraft()); setPage('detail'); setDetailTab('edit'); };
   const day = bundle?.day;
   const ov = stats?.overview || {};
@@ -94,6 +125,7 @@ function App() {
 
   const navItems = [
     { id: 'dashboard', icon: Home, label: 'Dashboard' },
+    { id: 'analyze', icon: Zap, label: 'Analyze' },
     { id: 'days', icon: Calendar, label: 'Trade Days' },
     { id: 'intel', icon: Sparkles, label: 'Intelligence' },
     { id: 'patterns', icon: Layers, label: 'Patterns' },
@@ -138,6 +170,64 @@ function App() {
                 {stats.top_patterns.map(p => <tr key={p.name}><td style={{ fontWeight: 500 }}>{p.name}</td><td className="mono">{p.sample_count}</td><td className={`mono ${pnlC((p.win_rate || 0) - 0.5)}`}>{pct(p.win_rate)}</td><td className={`mono ${pnlC(p.avg_pnl)}`}>{p.avg_pnl != null ? pnl$(p.avg_pnl) : '—'}</td></tr>)}
               </tbody></table>
             </div>}
+          </>}
+
+          {/* ── ANALYZE ─────────────── */}
+          {page === 'analyze' && <>
+            <div className="page-header"><h1 className="page-header__title">Analyze Premarket</h1><p className="page-header__sub">Upload today's chart and get intelligence from your history</p></div>
+            <div className="section">
+              <div className="analyze-upload">
+                <Zap size={28} />
+                <p>Drop a premarket screenshot to analyze</p>
+                <label className="btn btn--primary" style={{ cursor: 'pointer' }}>
+                  <Upload size={14} /> Upload Screenshot
+                  <input type="file" hidden accept="image/*" onChange={e => { analyzePremarket(e.target.files[0]); e.target.value = ''; }} />
+                </label>
+              </div>
+            </div>
+
+            {analyzeResult && <>
+              {/* Recommendation card */}
+              {analyzeResult.recommendation && <div className="section">
+                <div className="analyze-rec">
+                  <div className="analyze-rec__head">
+                    <Brain size={20} />
+                    <span>Trading AI Recommendation</span>
+                  </div>
+                  {analyzeResult.recommendation.times_seen > 0 && <p className="analyze-rec__seen">You've seen this structure <strong>{analyzeResult.recommendation.times_seen} times</strong>.</p>}
+                  <div className="stat-grid" style={{ marginBottom: 16 }}>
+                    <div className="stat-card"><div className="stat-card__label">Avg Result</div><div className={`stat-card__value ${pnlC(analyzeResult.stats?.avg_pnl)}`}>{analyzeResult.stats?.avg_pnl != null ? pnl$(analyzeResult.stats.avg_pnl) : '—'}</div></div>
+                    <div className="stat-card"><div className="stat-card__label">Win Rate</div><div className="stat-card__value">{analyzeResult.stats?.win_rate != null ? pct(analyzeResult.stats.win_rate) : '—'}</div></div>
+                    <div className="stat-card"><div className="stat-card__label">Risk Level</div><div className="stat-card__value" style={{ fontSize: 20, textTransform: 'capitalize' }}>{analyzeResult.recommendation.risk_level || '—'}</div></div>
+                  </div>
+                  {analyzeResult.recommendation.best_strategy && <div className="analyze-rec__row"><span className="analyze-rec__label">Best Strategy</span><p>{analyzeResult.recommendation.best_strategy}</p></div>}
+                  {analyzeResult.recommendation.most_common_mistake && <div className="analyze-rec__row"><span className="analyze-rec__label">Common Mistake</span><p>{analyzeResult.recommendation.most_common_mistake}</p></div>}
+                  {analyzeResult.recommendation.recommendation && <div className="analyze-rec__row analyze-rec__row--accent"><span className="analyze-rec__label">Recommendation</span><p>{analyzeResult.recommendation.recommendation}</p></div>}
+                  {analyzeResult.recommendation.pattern_summary && <div className="analyze-rec__row"><span className="analyze-rec__label">Pattern</span><p>{analyzeResult.recommendation.pattern_summary}</p></div>}
+                </div>
+              </div>}
+
+              {/* Chart analysis */}
+              {analyzeResult.chart_analysis && <div className="section"><div className="section__head"><span className="section__title">Chart Analysis</span></div>
+                <div className="intel-block__grid">
+                  {analyzeResult.chart_analysis.gap_direction && <div className="intel-block__item"><span className="intel-block__key">gap</span><span className="intel-block__val">{analyzeResult.chart_analysis.gap_direction}</span></div>}
+                  {analyzeResult.chart_analysis.premarket_trend && <div className="intel-block__item"><span className="intel-block__key">trend</span><span className="intel-block__val">{analyzeResult.chart_analysis.premarket_trend}</span></div>}
+                  {analyzeResult.chart_analysis.directional_bias && <div className="intel-block__item"><span className="intel-block__key">bias</span><span className="intel-block__val">{analyzeResult.chart_analysis.directional_bias}</span></div>}
+                  {analyzeResult.chart_analysis.volume_assessment && <div className="intel-block__item"><span className="intel-block__key">volume</span><span className="intel-block__val">{analyzeResult.chart_analysis.volume_assessment}</span></div>}
+                </div>
+                {analyzeResult.chart_analysis.summary && <div className="intel-summary" style={{ marginTop: 12 }}><p>{analyzeResult.chart_analysis.summary}</p></div>}
+              </div>}
+
+              {/* Similar days from analysis */}
+              {analyzeResult.similar_days?.length > 0 && <div className="section"><div className="section__head"><span className="section__title">Similar Historical Days</span></div>
+                <div className="similar-list">{analyzeResult.similar_days.map((s, i) => <button className="similar-card" key={i} onClick={() => { if (s.day_id) openDay(s.day_id); }}>
+                  <div className="similar-card__top"><span className="similar-card__date">{fmt(s.trade_date)}</span><span className="similar-card__score">{Math.round((s.similarity || 0) * 100)}%</span></div>
+                  <span className="similar-card__ticker">{s.tickers} {s.title}</span>
+                  <div className="similar-card__meta">{s.pnl != null && <span className={pnlC(s.pnl)}>{pnl$(s.pnl)}</span>}{s.ai_pattern_tags && <span style={{ color: 'var(--text-3)' }}>{s.ai_pattern_tags}</span>}</div>
+                  <ChevronRight size={14} className="similar-card__arrow" />
+                </button>)}</div>
+              </div>}
+            </>}
           </>}
 
           {/* ── DAYS LIST ────────────── */}
@@ -319,9 +409,30 @@ function App() {
 
           {/* ── PATTERNS ─────────────── */}
           {page === 'patterns' && <>
-            <div className="page-header"><h1 className="page-header__title">Pattern Library</h1><p className="page-header__sub">{patterns.length} patterns tracked</p></div>
-            <table className="pattern-table"><thead><tr><th>Pattern</th><th>Days</th><th>Win Rate</th><th>Avg P&L</th><th>Description</th></tr></thead><tbody>
-              {patterns.map(p => <tr key={p.id} style={{ cursor: 'pointer' }} onClick={() => { qf('pattern', p.name); setPage('intel'); }}><td style={{ fontWeight: 500 }}>{p.name}</td><td className="mono">{p.sample_count || 0}</td><td className={`mono ${pnlC((p.win_rate || 0) - 0.5)}`}>{p.win_rate != null ? pct(p.win_rate) : '—'}</td><td className={`mono ${pnlC(p.avg_pnl)}`}>{p.avg_pnl != null ? pnl$(p.avg_pnl) : '—'}</td><td style={{ color: 'var(--text-2)', fontSize: '12.5px' }}>{(p.description || '').slice(0, 80)}</td></tr>)}
+            <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div><h1 className="page-header__title">Pattern Library</h1><p className="page-header__sub">{patterns.length} patterns tracked</p></div>
+              <button className="btn btn--primary" onClick={createNewPattern}><Plus size={14} /> New Pattern</button>
+            </div>
+            <table className="pattern-table"><thead><tr><th>Pattern</th><th>Days</th><th>Win Rate</th><th>Avg P&L</th><th>Description</th><th style={{ width: 80 }}></th></tr></thead><tbody>
+              {patterns.map(p => editingPattern === p.id ? (
+                <tr key={p.id}>
+                  <td><input className="field__input" style={{ padding: '6px 8px', fontSize: 13 }} value={patternDraft.name || ''} onChange={e => setPatternDraft({ ...patternDraft, name: e.target.value })} /></td>
+                  <td className="mono">{p.sample_count || 0}</td>
+                  <td className={`mono ${pnlC((p.win_rate || 0) - 0.5)}`}>{p.win_rate != null ? pct(p.win_rate) : '—'}</td>
+                  <td className={`mono ${pnlC(p.avg_pnl)}`}>{p.avg_pnl != null ? pnl$(p.avg_pnl) : '—'}</td>
+                  <td><input className="field__input" style={{ padding: '6px 8px', fontSize: 12, width: '100%' }} value={patternDraft.description || ''} onChange={e => setPatternDraft({ ...patternDraft, description: e.target.value })} /></td>
+                  <td><div style={{ display: 'flex', gap: 4 }}><button className="btn btn--primary" style={{ padding: '4px 8px' }} onClick={() => savePattern(p.id)}><Check size={13} /></button><button className="btn btn--ghost" style={{ padding: '4px 8px' }} onClick={() => setEditingPattern(null)}><X size={13} /></button></div></td>
+                </tr>
+              ) : (
+                <tr key={p.id}>
+                  <td style={{ fontWeight: 500, cursor: 'pointer' }} onClick={() => { qf('pattern', p.name); setPage('intel'); }}>{p.name}</td>
+                  <td className="mono">{p.sample_count || 0}</td>
+                  <td className={`mono ${pnlC((p.win_rate || 0) - 0.5)}`}>{p.win_rate != null ? pct(p.win_rate) : '—'}</td>
+                  <td className={`mono ${pnlC(p.avg_pnl)}`}>{p.avg_pnl != null ? pnl$(p.avg_pnl) : '—'}</td>
+                  <td style={{ color: 'var(--text-2)', fontSize: '12.5px' }}>{(p.description || '').slice(0, 80)}</td>
+                  <td><div style={{ display: 'flex', gap: 4 }}><button className="btn btn--ghost" style={{ padding: '4px 8px' }} onClick={() => { setEditingPattern(p.id); setPatternDraft({ name: p.name, description: p.description, rules: p.rules, tags: p.tags }); }}><Pencil size={13} /></button><button className="btn btn--danger" style={{ padding: '4px 8px' }} onClick={() => deletePattern(p.id)}><Trash2 size={13} /></button></div></td>
+                </tr>
+              ))}
             </tbody></table>
           </>}
         </div>
