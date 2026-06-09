@@ -30,7 +30,7 @@ def init_db():
         cur.execute('''
         CREATE TABLE IF NOT EXISTS uploads (
           id SERIAL PRIMARY KEY, day_id INTEGER REFERENCES trading_days(id) ON DELETE CASCADE,
-          kind TEXT NOT NULL CHECK (kind IN ('premarket','trade','ideal','csv','other')),
+          kind TEXT NOT NULL CHECK (kind IN ('premarket','trade','ideal','postmarket','csv','other')),
           filename TEXT NOT NULL, content_type TEXT DEFAULT '', storage_provider TEXT DEFAULT 'r2',
           storage_key TEXT NOT NULL, url TEXT DEFAULT '', extracted_text TEXT DEFAULT '', ai_description TEXT DEFAULT '',
           ai_json JSONB DEFAULT '{}'::jsonb, custom_fields JSONB DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ DEFAULT NOW()
@@ -92,6 +92,8 @@ def init_db():
             "ALTER TABLE trading_days ADD COLUMN IF NOT EXISTS likely_scenarios TEXT DEFAULT ''",
             "ALTER TABLE playbook_patterns ADD COLUMN IF NOT EXISTS sample_count INTEGER DEFAULT 0",
             "ALTER TABLE playbook_patterns ADD COLUMN IF NOT EXISTS avg_pnl REAL DEFAULT NULL",
+            "ALTER TABLE uploads DROP CONSTRAINT IF EXISTS uploads_kind_check",
+            "ALTER TABLE uploads ADD CONSTRAINT uploads_kind_check CHECK (kind IN ('premarket','trade','ideal','postmarket','csv','other'))",
         ]
         for m in migrations:
             try:

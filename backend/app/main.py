@@ -122,6 +122,31 @@ def _update_pattern_stats(cur):
 def health():
     return {'ok': True, 'ai_enabled': has_ai(), 'r2_enabled': storage.enabled}
 
+@app.get('/stats')
+def dashboard_stats():
+    """Aggregate stats for the dashboard."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('''SELECT
+            COUNT(*) as total_days,
+            SUM(pnl) as total_pnl,
+            AVG(pnl) as avg_pnl,
+            AVG(execution_score) as avg_score,
+            SUM(num_trades) as total_trades,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_days,
+            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_days,
+            AVG(CASE WHEN pnl > 0 THEN 1.0 WHEN pnl < 0 THEN 0.0 ELSE NULL END) as win_rate,
+            MAX(pnl) as best_day,
+            MIN(pnl) as worst_day
+            FROM trading_days''')
+        overview = cur.fetchone()
+        cur.execute('''SELECT p.name, p.sample_count, p.win_rate, p.avg_pnl
+            FROM playbook_patterns p WHERE p.sample_count > 0
+            ORDER BY p.sample_count DESC LIMIT 10''')
+        top_patterns = cur.fetchall()
+        cur.execute('SELECT * FROM trading_days ORDER BY trade_date DESC LIMIT 5')
+        recent = cur.fetchall()
+        return {'overview': overview, 'top_patterns': top_patterns, 'recent_days': recent}
+
 @app.get('/days')
 def list_days(q: str = '', limit: int = 200):
     with get_conn() as conn, conn.cursor() as cur:
@@ -289,7 +314,18 @@ async def upload(day_id: int, kind: str = Form(...), file: UploadFile = File(...
                 (day_id, up['id'], kind, content_for_embedding, emb))
 
         conn.commit()
-        return up
+
+    # ── Auto-find similar days on premarket upload ──
+    similar_days = []
+    if kind == 'premarket' and emb:
+        try:
+            similar_days = find_similar(day_id, limit=5)
+        except Exception:
+            pass
+
+    result = dict(up)
+    result['similar_days'] = similar_days
+    return result
 
 # ── Intelligence with auto-pattern tagging ───────────
 
