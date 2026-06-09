@@ -134,13 +134,18 @@ def _collect(store: dict, data: dict):
                     existing.add(item.get('id'))
 
 
-async def _fetch_entities_async(timeout: int = 40) -> dict:
+async def _fetch_entities_async(timeout: int = 40, account_id: int = None) -> dict:
     """
     Async WebSocket connection to Tradovate.
     1. Receive 'o' frame → send authorize
-    2. Receive auth response → send user/syncrequest
-    3. Receive syncrequest response with all entity data
+    2. Receive auth response → send user/syncrequest with accounts parameter
+    3. Receive syncrequest response with all entity data including fills/fillPairs
     4. Return collected entities
+
+    Key: syncrequest with {"users":[]} only returns user-level entities.
+         syncrequest with {"accounts":[accountId]} returns account-level entities
+         including fills, fillPairs, orders, positions.
+         We send BOTH to get everything.
     """
     import websockets
 
@@ -158,12 +163,15 @@ async def _fetch_entities_async(timeout: int = 40) -> dict:
         open_timeout=10,
         ping_interval=20,
         ping_timeout=10,
-        max_size=10 * 1024 * 1024,  # 10MB — sync response can be large
+        max_size=10 * 1024 * 1024,
     ) as ws:
-        auth_sent = False
-        sync_sent = False
-        auth_req_id = None
-        sync_req_id = None
+        auth_sent      = False
+        sync1_sent     = False
+        sync2_sent     = False
+        sync1_done     = False
+        auth_req_id    = None
+        sync1_req_id   = None
+        sync2_req_id   = None
 
         deadline = asyncio.get_event_loop().time() + timeout
 
@@ -172,18 +180,20 @@ async def _fetch_entities_async(timeout: int = 40) -> dict:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 8.0))
             except asyncio.TimeoutError:
-                if sync_sent and store:
-                    # We've received data and nothing new is coming — done
+                if sync2_sent and store:
                     break
-                if sync_sent:
-                    logger.warning('WS: timeout waiting for syncrequest response')
-                    break
+                if sync1_sent and not sync2_sent:
+                    # sync1 timed out without response — send sync2 anyway
+                    if account_id:
+                        sync2_msg = make_msg('user/syncrequest', json.dumps({'accounts': [account_id]}))
+                        sync2_req_id = req_id
+                        await ws.send(sync2_msg)
+                        sync2_sent = True
                 continue
 
             if not raw or raw == 'h':
                 continue
 
-            # Open frame — send auth immediately
             if raw == 'o':
                 msg = make_msg('authorize', token)
                 auth_req_id = req_id
@@ -197,25 +207,42 @@ async def _fetch_entities_async(timeout: int = 40) -> dict:
                     continue
 
                 # Auth response
-                if auth_sent and msg.get('i') == auth_req_id:
+                if auth_sent and not sync1_sent and msg.get('i') == auth_req_id:
                     if msg.get('s') != 200:
                         raise RuntimeError(f'WS auth failed (status {msg.get("s")}): {msg}')
-                    # Send syncrequest
-                    sync_msg = make_msg('user/syncrequest', json.dumps({'users': []}))
-                    sync_req_id = req_id
-                    await ws.send(sync_msg)
-                    sync_sent = True
+                    # Send syncrequest 1: user-level (accounts, positions, etc.)
+                    sync1_msg = make_msg('user/syncrequest', json.dumps({'users': []}))
+                    sync1_req_id = req_id
+                    await ws.send(sync1_msg)
+                    sync1_sent = True
                     continue
 
-                # Syncrequest response — contains all entities
-                if sync_sent and msg.get('i') == sync_req_id:
-                    if msg.get('s') != 200:
-                        raise RuntimeError(f'WS syncrequest failed (status {msg.get("s")}): {msg}')
-                    _collect(store, msg.get('d', {}))
-                    logger.info(f'WS syncrequest complete, entities: { {k: len(v) for k, v in store.items()} }')
-                    return store  # All data received, close connection
+                # Syncrequest 1 response
+                if sync1_sent and not sync1_done and msg.get('i') == sync1_req_id:
+                    if msg.get('s') == 200:
+                        _collect(store, msg.get('d', {}))
+                        logger.info(f'WS sync1 (users) complete: {list(store.keys())}')
+                    sync1_done = True
+                    # Send syncrequest 2: account-level (fills, fillPairs, orders)
+                    if account_id:
+                        sync2_msg = make_msg('user/syncrequest', json.dumps({'accounts': [account_id]}))
+                        sync2_req_id = req_id
+                        await ws.send(sync2_msg)
+                        sync2_sent = True
+                    else:
+                        # No account_id — use what we have
+                        logger.info('No account_id provided, skipping accounts syncrequest')
+                        return store
+                    continue
 
-                # Real-time entity push (shouldn't happen on initial connect, but handle it)
+                # Syncrequest 2 response
+                if sync2_sent and msg.get('i') == sync2_req_id:
+                    if msg.get('s') == 200:
+                        _collect(store, msg.get('d', {}))
+                        logger.info(f'WS sync2 (accounts) complete: {list(store.keys())}')
+                    return store  # All data collected
+
+                # Real-time props push
                 if msg.get('e') == 'props':
                     _collect(store, msg.get('d', {}))
 

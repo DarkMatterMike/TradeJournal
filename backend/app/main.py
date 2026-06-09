@@ -924,7 +924,7 @@ async def tradovate_sync(account_id: int):
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        entities = await tv._fetch_entities_async(timeout=40)
+        entities = await tv._fetch_entities_async(timeout=40, account_id=account_id)
 
         fill_pairs      = entities.get('fillPairs', [])
         fills           = entities.get('fills', [])
@@ -994,7 +994,7 @@ async def tradovate_preview(account_id: int):
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        entities = await tv._fetch_entities_async(timeout=40)
+        entities = await tv._fetch_entities_async(timeout=40, account_id=account_id)
 
         fill_pairs      = entities.get('fillPairs', [])
         fills           = entities.get('fills', [])
