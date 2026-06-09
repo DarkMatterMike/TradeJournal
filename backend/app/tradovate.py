@@ -136,16 +136,9 @@ def _collect(store: dict, data: dict):
 
 async def _fetch_entities_async(timeout: int = 40, account_id: int = None) -> dict:
     """
-    Async WebSocket connection to Tradovate.
-    1. Receive 'o' frame → send authorize
-    2. Receive auth response → send user/syncrequest with accounts parameter
-    3. Receive syncrequest response with all entity data including fills/fillPairs
-    4. Return collected entities
-
-    Key: syncrequest with {"users":[]} only returns user-level entities.
-         syncrequest with {"accounts":[accountId]} returns account-level entities
-         including fills, fillPairs, orders, positions.
-         We send BOTH to get everything.
+    Two-phase entity fetch:
+    Phase 1: WebSocket syncrequest (users + accounts params)
+    Phase 2: REST fallback via order/deps → fill/ldeps chain if WS returns no fills
     """
     import websockets
 
@@ -158,95 +151,143 @@ async def _fetch_entities_async(timeout: int = 40, account_id: int = None) -> di
         req_id += 1
         return f'{endpoint}\n{req_id}\n\n{body}'
 
-    async with websockets.connect(
-        WS_URL,
-        open_timeout=10,
-        ping_interval=20,
-        ping_timeout=10,
-        max_size=10 * 1024 * 1024,
-    ) as ws:
-        auth_sent      = False
-        sync1_sent     = False
-        sync2_sent     = False
-        sync1_done     = False
-        auth_req_id    = None
-        sync1_req_id   = None
-        sync2_req_id   = None
+    # ── Phase 1: WebSocket ─────────────────────────────────────────────────────
+    try:
+        async with websockets.connect(
+            WS_URL, open_timeout=10, ping_interval=20, ping_timeout=10,
+            max_size=10 * 1024 * 1024,
+        ) as ws:
+            auth_sent = sync1_sent = sync2_sent = sync1_done = False
+            auth_req_id = sync1_req_id = sync2_req_id = None
+            deadline = asyncio.get_event_loop().time() + 25
 
-        deadline = asyncio.get_event_loop().time() + timeout
-
-        while asyncio.get_event_loop().time() < deadline:
-            remaining = max(1.0, deadline - asyncio.get_event_loop().time())
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 8.0))
-            except asyncio.TimeoutError:
-                if sync2_sent and store:
-                    break
-                if sync1_sent and not sync2_sent:
-                    # sync1 timed out without response — send sync2 anyway
-                    if account_id:
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = max(1.0, deadline - asyncio.get_event_loop().time())
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 6.0))
+                except asyncio.TimeoutError:
+                    if sync2_sent:
+                        break
+                    if sync1_done and not sync2_sent and account_id:
                         sync2_msg = make_msg('user/syncrequest', json.dumps({'accounts': [account_id]}))
                         sync2_req_id = req_id
                         await ws.send(sync2_msg)
                         sync2_sent = True
-                continue
-
-            if not raw or raw == 'h':
-                continue
-
-            if raw == 'o':
-                msg = make_msg('authorize', token)
-                auth_req_id = req_id
-                await ws.send(msg)
-                auth_sent = True
-                continue
-
-            msgs = _parse_frame(raw)
-            for msg in msgs:
-                if not isinstance(msg, dict):
                     continue
 
-                # Auth response
-                if auth_sent and not sync1_sent and msg.get('i') == auth_req_id:
-                    if msg.get('s') != 200:
-                        raise RuntimeError(f'WS auth failed (status {msg.get("s")}): {msg}')
-                    # Send syncrequest 1: user-level (accounts, positions, etc.)
-                    sync1_msg = make_msg('user/syncrequest', json.dumps({'users': []}))
-                    sync1_req_id = req_id
-                    await ws.send(sync1_msg)
-                    sync1_sent = True
+                if not raw or raw == 'h':
                     continue
 
-                # Syncrequest 1 response
-                if sync1_sent and not sync1_done and msg.get('i') == sync1_req_id:
-                    if msg.get('s') == 200:
+                if raw == 'o':
+                    await ws.send(make_msg('authorize', token))
+                    auth_req_id = req_id
+                    auth_sent = True
+                    continue
+
+                for msg in _parse_frame(raw):
+                    if not isinstance(msg, dict):
+                        continue
+                    if auth_sent and not sync1_sent and msg.get('i') == auth_req_id:
+                        if msg.get('s') != 200:
+                            raise RuntimeError(f'WS auth failed: {msg}')
+                        await ws.send(make_msg('user/syncrequest', json.dumps({'users': []})))
+                        sync1_req_id = req_id
+                        sync1_sent = True
+                        continue
+                    if sync1_sent and not sync1_done and msg.get('i') == sync1_req_id:
+                        if msg.get('s') == 200:
+                            _collect(store, msg.get('d', {}))
+                        sync1_done = True
+                        if account_id:
+                            await ws.send(make_msg('user/syncrequest', json.dumps({'accounts': [account_id]})))
+                            sync2_req_id = req_id
+                            sync2_sent = True
+                        else:
+                            break
+                        continue
+                    if sync2_sent and msg.get('i') == sync2_req_id:
+                        if msg.get('s') == 200:
+                            _collect(store, msg.get('d', {}))
+                        break
+                    if msg.get('e') == 'props':
                         _collect(store, msg.get('d', {}))
-                        logger.info(f'WS sync1 (users) complete: {list(store.keys())}')
-                    sync1_done = True
-                    # Send syncrequest 2: account-level (fills, fillPairs, orders)
-                    if account_id:
-                        sync2_msg = make_msg('user/syncrequest', json.dumps({'accounts': [account_id]}))
-                        sync2_req_id = req_id
-                        await ws.send(sync2_msg)
-                        sync2_sent = True
-                    else:
-                        # No account_id — use what we have
-                        logger.info('No account_id provided, skipping accounts syncrequest')
-                        return store
+                else:
                     continue
+                break
 
-                # Syncrequest 2 response
-                if sync2_sent and msg.get('i') == sync2_req_id:
-                    if msg.get('s') == 200:
-                        _collect(store, msg.get('d', {}))
-                        logger.info(f'WS sync2 (accounts) complete: {list(store.keys())}')
-                    return store  # All data collected
+    except Exception as e:
+        logger.warning(f'WS phase failed: {e}')
 
-                # Real-time props push
-                if msg.get('e') == 'props':
-                    _collect(store, msg.get('d', {}))
+    # ── Phase 2: REST fallback via order chain ─────────────────────────────────
+    if not store.get('fills') and not store.get('fillPairs') and account_id:
+        logger.info('WS returned no fills — trying REST order/deps chain')
+        try:
+            rest_data = await _fetch_fills_via_rest(account_id)
+            for k, v in rest_data.items():
+                if k not in store:
+                    store[k] = v
+        except Exception as e:
+            logger.warning(f'REST fallback failed: {e}')
 
+    logger.info(f'Entity fetch complete: { {k: len(v) for k, v in store.items()} }')
     return store
+
+
+async def _fetch_fills_via_rest(account_id: int) -> dict:
+    """
+    REST chain: account → orders → fills + fillPairs + contracts.
+    Uses /entity/deps and /entity/ldeps endpoints from the Swagger spec.
+    """
+    loop = asyncio.get_event_loop()
+
+    def _r(ep, params=None):
+        return _rest_get(ep, params)
+
+    result: dict = {}
+
+    # 1. Get orders for this account
+    orders = await loop.run_in_executor(None, lambda: _r('order/deps', {'masterid': account_id}))
+    if not isinstance(orders, list) or not orders:
+        logger.info(f'order/deps returned {orders!r}')
+        return result
+
+    result['orders'] = orders
+    order_ids = ','.join(str(o['id']) for o in orders if isinstance(o, dict) and o.get('id'))
+    if not order_ids:
+        return result
+
+    # 2. Fills for those orders
+    try:
+        fills = await loop.run_in_executor(None, lambda: _r('fill/ldeps', {'masterids': order_ids}))
+        if isinstance(fills, list):
+            result['fills'] = fills
+            logger.info(f'fill/ldeps returned {len(fills)} fills')
+    except Exception as e:
+        logger.warning(f'fill/ldeps: {e}')
+
+    # 3. FillPairs for those orders
+    try:
+        fps = await loop.run_in_executor(None, lambda: _r('fillPair/ldeps', {'masterids': order_ids}))
+        if isinstance(fps, list):
+            result['fillPairs'] = fps
+            logger.info(f'fillPair/ldeps returned {len(fps)} fillPairs')
+    except Exception as e:
+        logger.warning(f'fillPair/ldeps: {e}')
+
+    # 4. Contracts for those fills
+    fills_list = result.get('fills', [])
+    if fills_list:
+        cids = ','.join(str(f['contractId']) for f in fills_list
+                         if isinstance(f, dict) and f.get('contractId'))
+        if cids:
+            try:
+                contracts = await loop.run_in_executor(None, lambda: _r('contract/ldeps', {'masterids': cids}))
+                if isinstance(contracts, list):
+                    result['contracts'] = contracts
+            except Exception as e:
+                logger.warning(f'contract/ldeps: {e}')
+
+    return result
 
 
 def fetch_all_entities(timeout: int = 40) -> dict:
