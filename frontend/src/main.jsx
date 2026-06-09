@@ -867,9 +867,6 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     {/* Actions */}
     {selectedAccount && <div className="section">
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button className="btn btn--amber" onClick={runWsSync} disabled={!!loading} title="Triggers a WebSocket session sync to load all historical trades into Tradovate's cache before importing">
-          {loading === 'wssync' ? <Loader2 size={13} className="spin" /> : <Activity size={13} />} Load Historical Data
-        </button>
         <button className="btn btn--ghost" onClick={runPreview} disabled={!!loading}>
           {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview Trades
         </button>
@@ -878,19 +875,19 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
         </button>
       </div>
       <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>
-        <strong style={{ color: 'var(--amber)' }}>First time?</strong> Click <em>Load Historical Data</em> first — this triggers a WebSocket session sync that tells Tradovate to make your full trade history available via the API. Then Preview or Import.
+        Connects directly via WebSocket and collects your full trade history. Preview first, then import. Import is idempotent — safe to re-run.
       </p>
     </div>}
 
     {/* Preview results */}
     {preview && <div className="section">
-      <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs matched</span></div>
-      {/* Debug info */}
-      <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <span>Tradovate internal ID sent: <code style={{ color: 'var(--accent)' }}>{preview.account_id_requested}</code></span>
-        <span>Account IDs seen in API response: <code style={{ color: 'var(--accent)' }}>{(preview.account_ids_in_response || []).join(', ') || 'none'}</code></span>
-        <span>Total fill pairs returned by API: <code style={{ color: 'var(--accent)' }}>{preview.total_fill_pairs_returned}</code></span>
-      </div>
+      <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs</span></div>
+      {/* Entity counts from WebSocket response */}
+      {preview.entity_counts && <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+        {Object.entries(preview.entity_counts).map(([k, v]) => (
+          <span key={k}><code style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</code></span>
+        ))}
+      </div>}
       {preview.fill_pair_count === 0
         ? <div className="empty-state" style={{ padding: 20 }}>
             <p>No fill pairs returned. This can happen if:</p>
@@ -917,9 +914,11 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
             ))}
           </tbody></table></div>
       }
-      {preview.raw_sample && <details style={{ marginTop: 12 }}>
-        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw API response sample (first 3)</summary>
-        <pre style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6 }}>{JSON.stringify(preview.raw_sample, null, 2)}</pre>
+      {(preview.raw_fill_pair_sample || preview.raw_sample) && <details style={{ marginTop: 12 }}>
+        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw WebSocket data samples</summary>
+        <pre style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6 }}>
+          {JSON.stringify({ fillPair: preview.raw_fill_pair_sample, fill: preview.raw_fill_sample }, null, 2)}
+        </pre>
       </details>}
     </div>}
 
@@ -933,7 +932,11 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
         <div className="stat-card"><div className="stat-card__label">Errors</div><div className={`stat-card__value ${syncResult.errors?.length ? 'negative' : ''}`}>{syncResult.errors?.length || 0}</div></div>
       </div>
       {syncResult.message && <p style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8 }}>{syncResult.message}</p>}
-      {syncResult.ws_sync && <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>WebSocket sync: {syncResult.ws_sync.status}{syncResult.ws_sync.entities?.length ? ' · ' + syncResult.ws_sync.entities.join(', ') : ''}</p>}
+      {syncResult.entity_counts && <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        {Object.entries(syncResult.entity_counts).map(([k, v]) => (
+          <span key={k}><code style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</code></span>
+        ))}
+      </div>}
       {syncResult.errors?.length > 0 && <div style={{ marginTop: 12 }}>
         <p style={{ fontSize: 12, color: 'var(--amber)', marginBottom: 6 }}>Errors:</p>
         {syncResult.errors.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--text-3)', padding: '3px 0' }}>{e}</div>)}
