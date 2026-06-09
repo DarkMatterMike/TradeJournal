@@ -882,12 +882,25 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     {/* Preview results */}
     {preview && <div className="section">
       <div className="section__head"><span className="section__title">Preview — {preview.fill_pair_count} fill pairs</span></div>
-      {/* Entity counts from WebSocket response */}
-      {preview.entity_counts && <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12, display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        {Object.entries(preview.entity_counts).map(([k, v]) => (
-          <span key={k}><code style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</code></span>
-        ))}
-      </div>}
+
+      {/* Phase breakdown */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+        <div style={{ padding: 12, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-2)' }}>WebSocket Phase</div>
+          {preview.ws_phase?.error && <div style={{ color: 'var(--red)', marginBottom: 4 }}>Error: {preview.ws_phase.error}</div>}
+          {Object.entries(preview.ws_phase?.entity_counts || {}).map(([k, v]) => (
+            <div key={k} style={{ color: v > 0 ? 'var(--accent)' : 'var(--text-3)' }}>{k}: {v}</div>
+          ))}
+        </div>
+        <div style={{ padding: 12, background: 'var(--surface-0)', borderRadius: 8, border: '1px solid var(--border)', fontSize: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, color: 'var(--text-2)' }}>REST Phase (order/deps chain)</div>
+          {preview.rest_phase?.error && <div style={{ color: 'var(--red)', marginBottom: 4 }}>Error: {preview.rest_phase.error}</div>}
+          <div style={{ color: 'var(--text-2)' }}>Orders found: {preview.rest_phase?.orders_found ?? '—'}</div>
+          {Object.entries(preview.rest_phase?.entity_counts || {}).map(([k, v]) => (
+            <div key={k} style={{ color: v > 0 ? 'var(--green)' : 'var(--text-3)' }}>{k}: {v}</div>
+          ))}
+        </div>
+      </div>
       {preview.fill_pair_count === 0
         ? <div className="empty-state" style={{ padding: 20 }}>
             <p>No fill pairs returned. This can happen if:</p>
@@ -914,10 +927,14 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
             ))}
           </tbody></table></div>
       }
-      {(preview.raw_fill_pair_sample || preview.raw_sample) && <details style={{ marginTop: 12 }}>
-        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw WebSocket data samples</summary>
+      {(preview.rest_phase?.raw_order_sample?.length > 0 || preview.rest_phase?.raw_fill_sample?.length > 0) && <details style={{ marginTop: 12 }}>
+        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Raw REST samples</summary>
         <pre style={{ fontSize: 11, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6 }}>
-          {JSON.stringify({ fillPair: preview.raw_fill_pair_sample, fill: preview.raw_fill_sample }, null, 2)}
+          {JSON.stringify({
+            orders: preview.rest_phase?.raw_order_sample,
+            fills: preview.rest_phase?.raw_fill_sample,
+            fillPairs: preview.rest_phase?.raw_fillpair_sample,
+          }, null, 2)}
         </pre>
       </details>}
     </div>}

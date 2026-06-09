@@ -233,7 +233,83 @@ async def _fetch_entities_async(timeout: int = 40, account_id: int = None) -> di
     return store
 
 
-async def _fetch_fills_via_rest(account_id: int) -> dict:
+async def _run_ws_sync(account_id: int = None) -> dict:
+    """Expose just the WebSocket syncrequest phase (for diagnostics in preview)."""
+    import websockets
+
+    token  = _get_token()
+    store: dict = {}
+    req_id = 0
+
+    def make_msg(endpoint: str, body: str = '') -> str:
+        nonlocal req_id
+        req_id += 1
+        return f'{endpoint}\n{req_id}\n\n{body}'
+
+    async with websockets.connect(
+        WS_URL, open_timeout=10, ping_interval=20, ping_timeout=10,
+        max_size=10 * 1024 * 1024,
+    ) as ws:
+        auth_sent = sync1_sent = sync2_sent = sync1_done = False
+        auth_req_id = sync1_req_id = sync2_req_id = None
+        deadline = asyncio.get_event_loop().time() + 25
+
+        while asyncio.get_event_loop().time() < deadline:
+            remaining = max(1.0, deadline - asyncio.get_event_loop().time())
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 6.0))
+            except asyncio.TimeoutError:
+                if sync2_sent:
+                    break
+                if sync1_done and not sync2_sent and account_id:
+                    await ws.send(make_msg('user/syncrequest', json.dumps({'accounts': [account_id]})))
+                    sync2_req_id = req_id
+                    sync2_sent = True
+                continue
+
+            if not raw or raw == 'h':
+                continue
+            if raw == 'o':
+                await ws.send(make_msg('authorize', token))
+                auth_req_id = req_id
+                auth_sent = True
+                continue
+
+            for msg in _parse_frame(raw):
+                if not isinstance(msg, dict):
+                    continue
+                if auth_sent and not sync1_sent and msg.get('i') == auth_req_id:
+                    if msg.get('s') != 200:
+                        raise RuntimeError(f'WS auth failed: {msg}')
+                    await ws.send(make_msg('user/syncrequest', json.dumps({'users': []})))
+                    sync1_req_id = req_id
+                    sync1_sent = True
+                    continue
+                if sync1_sent and not sync1_done and msg.get('i') == sync1_req_id:
+                    if msg.get('s') == 200:
+                        _collect(store, msg.get('d', {}))
+                    sync1_done = True
+                    if account_id:
+                        await ws.send(make_msg('user/syncrequest', json.dumps({'accounts': [account_id]})))
+                        sync2_req_id = req_id
+                        sync2_sent = True
+                    else:
+                        break
+                    continue
+                if sync2_sent and msg.get('i') == sync2_req_id:
+                    if msg.get('s') == 200:
+                        _collect(store, msg.get('d', {}))
+                    break
+                if msg.get('e') == 'props':
+                    _collect(store, msg.get('d', {}))
+            else:
+                continue
+            break
+
+    return store
+
+
+
     """
     REST chain: account → orders → fills + fillPairs + contracts.
     Uses /entity/deps and /entity/ldeps endpoints from the Swagger spec.

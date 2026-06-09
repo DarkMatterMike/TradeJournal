@@ -994,11 +994,35 @@ async def tradovate_preview(account_id: int):
     if not tv._has_credentials():
         raise HTTPException(503, 'Tradovate credentials not configured.')
     try:
-        entities = await tv._fetch_entities_async(timeout=40, account_id=account_id)
+        # Run each phase explicitly so we can report what each one returned
+        import websockets
 
-        fill_pairs      = entities.get('fillPairs', [])
-        fills           = entities.get('fills', [])
-        contracts       = entities.get('contracts', [])
+        ws_entities: dict = {}
+        rest_entities: dict = {}
+        ws_error = None
+        rest_error = None
+
+        # ── Phase 1: WebSocket ──────────────────────────────────────────────
+        try:
+            ws_entities = await tv._run_ws_sync(account_id)
+        except Exception as e:
+            ws_error = str(e)
+
+        # ── Phase 2: REST order chain — always run in preview for diagnostics
+        try:
+            rest_entities = await tv._fetch_fills_via_rest(account_id)
+        except Exception as e:
+            rest_error = str(e)
+
+        # Merge: REST wins for fills/fillPairs if WS came up empty
+        merged = dict(ws_entities)
+        for k, v in rest_entities.items():
+            if k not in merged or not merged[k]:
+                merged[k] = v
+
+        fill_pairs      = merged.get('fillPairs', [])
+        fills           = merged.get('fills', [])
+        contracts       = merged.get('contracts', [])
         fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
         contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
 
@@ -1010,12 +1034,21 @@ async def tradovate_preview(account_id: int):
                 rows.append({'error': str(e), '_raw_fp': fp})
 
         return {
-            'entity_counts':       {k: len(v) for k, v in entities.items()},
-            'fill_pair_count':      len(fill_pairs),
-            'preview':              rows[:50],
-            'raw_fill_pair_sample': fill_pairs[:2],
-            'raw_fill_sample':      fills[:2],
-            'raw_contract_sample':  contracts[:1],
+            'ws_phase':  {
+                'entity_counts': {k: len(v) for k, v in ws_entities.items()},
+                'error': ws_error,
+            },
+            'rest_phase': {
+                'entity_counts': {k: len(v) for k, v in rest_entities.items()},
+                'error': rest_error,
+                'orders_found': len(rest_entities.get('orders', [])),
+                'raw_order_sample': rest_entities.get('orders', [])[:2],
+                'raw_fill_sample':  rest_entities.get('fills', [])[:2],
+                'raw_fillpair_sample': rest_entities.get('fillPairs', [])[:2],
+            },
+            'merged_entity_counts': {k: len(v) for k, v in merged.items()},
+            'fill_pair_count': len(fill_pairs),
+            'preview':    rows[:50],
         }
     except RuntimeError as e:
         raise HTTPException(503, str(e))
