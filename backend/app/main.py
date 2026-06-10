@@ -953,23 +953,20 @@ def tradovate_preview(account_id: int):
         raise HTTPException(401, 'Not authorized. Visit /tradovate/oauth/start first.')
     try:
         data = tv.fetch_fill_pairs(account_id)
-        fill_pairs      = data.get('fillPairs', [])
-        fills           = data.get('fills', [])
-        contracts       = data.get('contracts', [])
-        fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
-        contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
-        rows = []
-        for fp in fill_pairs:
-            try:
-                rows.append(tv._map_fill_pair(fp, fills_by_id, contracts_by_id))
-            except Exception as e:
-                rows.append({'error': str(e), '_raw': fp})
+        fill_pairs = data.get('fillPairs', [])
+        fills      = data.get('fills', [])
+
+        # fill_pairs are already fully mapped by _pair_fills_into_trades
+        # Strip internal debug fields for the preview table
+        preview_rows = [{k: v for k, v in fp.items() if not k.startswith('_')}
+                        for fp in fill_pairs[:50]]
+
         return {
             'counts': {k: len(v) for k, v in data.items() if isinstance(v, list)},
             'fill_pair_count': len(fill_pairs),
             'errors': data.get('_errors', []),
-            'preview': rows[:50],
-            'raw_fillpair': fill_pairs[:3],
+            'preview': preview_rows,
+            'raw_fillpair': fill_pairs[:2],
             'raw_fill': fills[:2],
         }
     except Exception as e:

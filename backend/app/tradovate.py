@@ -179,26 +179,193 @@ def fetch_fill_pairs(account_id: int) -> dict:
     result = {'fillPairs': [], 'fills': [], 'contracts': [], 'orders': []}
     errors = []
 
-    # 0. Try Reporting API first — this is what Tradovate support recommends
-    #    for historical data load. Uses same OAuth token.
+    # ── Primary: cashBalanceLog → fill/item chain ─────────────────────────────
+    # cashBalanceLog returns 89 records with fillId and delta per entry.
+    # We collect all fillIds, batch-fetch the fill details, then reconstruct trades.
     try:
-        fps = _rpt_get('fillPair/list')
-        if isinstance(fps, list) and fps:
-            result['fillPairs'] = fps
-            logger.info(f'RPT fillPair/list: {len(fps)} pairs')
+        logs = _rest_get('cashBalanceLog/list')
+        if isinstance(logs, list) and logs:
+            # Collect entries that have a fillId (actual trade/commission events)
+            fill_ids = [str(log['fillId']) for log in logs
+                        if isinstance(log, dict) and log.get('fillId')]
+            fill_ids = list(dict.fromkeys(fill_ids))  # deduplicate, preserve order
+
+            if fill_ids:
+                # Batch fetch fills in chunks of 100
+                fills = []
+                chunk_size = 100
+                for i in range(0, len(fill_ids), chunk_size):
+                    chunk = ','.join(fill_ids[i:i+chunk_size])
+                    try:
+                        batch = _rest_get('fill/ldeps', {'masterids': chunk})
+                        if isinstance(batch, list):
+                            fills.extend(batch)
+                    except Exception as e:
+                        # Try individual fetch as fallback
+                        for fid in fill_ids[i:i+chunk_size]:
+                            try:
+                                f = _rest_get(f'fill/item?id={fid}')
+                                if isinstance(f, dict) and f.get('id'):
+                                    fills.append(f)
+                            except Exception:
+                                pass
+                        errors.append(f'fill/ldeps chunk {i}: {e}')
+
+                if fills:
+                    result['fills'] = fills
+                    logger.info(f'cashBalanceLog chain: {len(logs)} logs → {len(fill_ids)} fillIds → {len(fills)} fills')
+
+                    # Fetch contracts
+                    cids = ','.join(str(f['contractId']) for f in fills
+                                    if isinstance(f, dict) and f.get('contractId'))
+                    if cids:
+                        try:
+                            contracts = _rest_get('contract/ldeps', {'masterids': cids})
+                            if isinstance(contracts, list):
+                                result['contracts'] = contracts
+                        except Exception as e:
+                            errors.append(f'contract/ldeps: {e}')
+
+                    # Now pair fills into round trips using the cashBalanceLog delta values
+                    # Build a lookup: fillId -> log entry (for delta/pnl)
+                    log_by_fill = {str(log['fillId']): log for log in logs
+                                   if isinstance(log, dict) and log.get('fillId')}
+                    result['fillPairs'] = _pair_fills_into_trades(fills, log_by_fill, result['contracts'])
+                    logger.info(f'Paired into {len(result["fillPairs"])} round-trip trades')
+                else:
+                    errors.append('fill/ldeps returned no fills for the fillIds from cashBalanceLog')
+            else:
+                errors.append('cashBalanceLog returned no entries with fillId')
+        else:
+            errors.append(f'cashBalanceLog/list returned: {logs!r}')
     except Exception as e:
-        errors.append(f'RPT fillPair/list: {e}')
+        errors.append(f'cashBalanceLog/list: {e}')
 
-    if not result['fillPairs']:
-        try:
-            fills = _rpt_get('fill/list')
-            if isinstance(fills, list) and fills:
-                result['fills'] = fills
-                logger.info(f'RPT fill/list: {len(fills)} fills')
-        except Exception as e:
-            errors.append(f'RPT fill/list: {e}')
+    result['_errors'] = errors
+    return result
 
-    # 1. Fall back to Live API fillPair/list
+
+def _pair_fills_into_trades(fills: list, log_by_fill: dict, contracts: list) -> list:
+    """
+    Pair individual fills into round-trip trades using FIFO matching.
+    Each fill is a single execution (buy or sell). We match opens with closes
+    chronologically per contract.
+    """
+    from collections import defaultdict
+
+    contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
+
+    def parse_ts(ts):
+        if not ts:
+            return None
+        for fmt in ('%Y-%m-%dT%H:%M:%S.%fZ', '%Y-%m-%dT%H:%M:%SZ'):
+            try:
+                return datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return None
+
+    # Sort fills by timestamp
+    sorted_fills = sorted(
+        [f for f in fills if isinstance(f, dict) and f.get('id')],
+        key=lambda f: parse_ts(f.get('timestamp') or f.get('tradeTime') or '') or datetime.min.replace(tzinfo=timezone.utc)
+    )
+
+    # Group by contractId
+    by_contract = defaultdict(list)
+    for f in sorted_fills:
+        if f.get('contractId'):
+            by_contract[f['contractId']].append(f)
+
+    paired = []
+
+    for contract_id, contract_fills in by_contract.items():
+        contract = contracts_by_id.get(contract_id, {})
+        symbol = contract.get('name') or contract.get('symbol') or f'contract_{contract_id}'
+        point_value = _get_point_value(contract.get('productName') or contract.get('name') or '')
+
+        # FIFO matching
+        open_stack = []  # list of {'fill': f, 'qty': remaining_qty}
+        position = 0.0
+
+        for f in contract_fills:
+            # Determine buy/sell from fill
+            buy_sell = f.get('buySell') or f.get('action') or ''
+            is_buy = buy_sell.lower() in ('buy', 'b') if buy_sell else None
+
+            # Try to infer from price change direction if buySell missing
+            qty = float(f.get('qty') or f.get('quantity') or 1)
+            price = float(f.get('price') or f.get('tradePrice') or 0)
+            fill_ts = parse_ts(f.get('timestamp') or f.get('tradeTime'))
+            fill_id = str(f.get('id', ''))
+
+            # Get P&L delta from cashBalanceLog if available
+            log_entry = log_by_fill.get(fill_id, {})
+            delta = float(log_entry.get('delta', 0))
+
+            # Determine direction: if we can't get it from the fill,
+            # infer from delta sign and position
+            if is_buy is None:
+                if position <= 0:
+                    is_buy = True  # default: assume buying to open/close short
+                else:
+                    is_buy = False
+
+            if position == 0 or (position > 0 and is_buy) or (position < 0 and not is_buy):
+                # Opening or adding to position
+                open_stack.append({'fill': f, 'qty': qty, 'price': price, 'ts': fill_ts, 'fill_id': fill_id})
+                position += qty if is_buy else -qty
+            else:
+                # Closing position — match against opens
+                remaining = qty
+                while remaining > 0 and open_stack:
+                    open_item = open_stack[0]
+                    match_qty = min(remaining, open_item['qty'])
+
+                    long_trade = position > 0
+                    entry_price = open_item['price']
+                    exit_price  = price
+                    entry_ts    = open_item['ts']
+                    exit_ts     = fill_ts
+
+                    gross_pnl = round((1 if long_trade else -1) * (exit_price - entry_price) * match_qty * point_value, 2)
+
+                    # Use log delta if available and it's a trade event
+                    if abs(delta) > 0 and log_entry.get('cashChangeType') not in ('Commission', 'NewSession'):
+                        net_pnl = round(delta, 2)
+                    else:
+                        net_pnl = gross_pnl  # commission deducted separately
+
+                    trade_date_str = exit_ts.strftime('%Y-%m-%d') if exit_ts else None
+
+                    paired.append({
+                        'tradovate_fill_pair_id': f"{open_item['fill_id']}_{fill_id}",
+                        'symbol':       symbol,
+                        'side':         'Long' if long_trade else 'Short',
+                        'qty':          match_qty,
+                        'entry_price':  entry_price,
+                        'exit_price':   exit_price,
+                        'pnl':          net_pnl,
+                        'gross_pnl':    gross_pnl,
+                        'entry_time':   entry_ts.isoformat() if entry_ts else None,
+                        'exit_time':    exit_ts.isoformat() if exit_ts else None,
+                        'trade_date':   trade_date_str,
+                        'source':       'tradovate_oauth',
+                        '_entry_fill':  open_item['fill'],
+                        '_exit_fill':   f,
+                    })
+
+                    open_item['qty'] -= match_qty
+                    remaining -= match_qty
+                    position -= match_qty if long_trade else -match_qty
+                    if open_item['qty'] <= 0:
+                        open_stack.pop(0)
+
+                if remaining > 0:
+                    open_stack.append({'fill': f, 'qty': remaining, 'price': price, 'ts': fill_ts, 'fill_id': fill_id})
+                    position += remaining if is_buy else -remaining
+
+    return paired
     try:
         fps = _rest_get('fillPair/list')
         if isinstance(fps, list):
@@ -334,46 +501,45 @@ def sync_fills_to_journal(account_id: int) -> dict:
 
     data = fetch_fill_pairs(account_id)
     fill_pairs = data.get('fillPairs', [])
-    fills      = data.get('fills', [])
-    contracts  = data.get('contracts', [])
 
     if not fill_pairs:
         return {'imported': 0, 'skipped': 0, 'days_updated': 0,
                 'errors': data.get('_errors', []),
                 'counts': {k: len(v) for k, v in data.items() if isinstance(v, list)},
-                'message': 'No fillPairs returned. Check errors for details.'}
-
-    fills_by_id     = {f['id']: f for f in fills     if isinstance(f, dict) and f.get('id')}
-    contracts_by_id = {c['id']: c for c in contracts if isinstance(c, dict) and c.get('id')}
+                'message': f'No trades found. Errors: {data.get("_errors", [])}'}
 
     imported = 0; skipped = 0; errors = list(data.get('_errors', [])); days_touched = set()
 
     with get_conn() as conn, conn.cursor() as cur:
-        for fp in fill_pairs:
+        for row in fill_pairs:
             try:
-                row = _map_fill_pair(fp, fills_by_id, contracts_by_id)
-                fpid = row.get('tradovate_fill_pair_id')
+                # Strip internal debug fields before storing
+                store_row = {k: v for k, v in row.items() if not k.startswith('_')}
+                fpid = store_row.get('tradovate_fill_pair_id')
                 if not fpid: skipped += 1; continue
+
                 cur.execute("SELECT id FROM trade_rows WHERE row_data->>'tradovate_fill_pair_id'=%s", (str(fpid),))
                 if cur.fetchone(): skipped += 1; continue
+
                 day_id = None
-                td = row.get('trade_date')
+                td = store_row.get('trade_date')
                 if td:
                     cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (td,))
                     dr = cur.fetchone()
                     if not dr:
                         cur.execute('INSERT INTO trading_days (trade_date,tickers,title) VALUES (%s,%s,%s) ON CONFLICT (trade_date) DO NOTHING RETURNING id',
-                                    (td, row.get('symbol',''), f'Auto-imported {td}'))
+                                    (td, store_row.get('symbol',''), f'Auto-imported {td}'))
                         dr = cur.fetchone()
                         if not dr:
                             cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (td,))
                             dr = cur.fetchone()
                     if dr: day_id = dr['id']
-                cur.execute('INSERT INTO trade_rows (day_id,row_data) VALUES (%s,%s)', (day_id, Json(row)))
+
+                cur.execute('INSERT INTO trade_rows (day_id,row_data) VALUES (%s,%s)', (day_id, Json(store_row)))
                 if day_id: days_touched.add((day_id, td))
                 imported += 1
             except Exception as e:
-                errors.append(f'fillPair {fp.get("id")}: {e}')
+                errors.append(f'trade {row.get("tradovate_fill_pair_id")}: {e}')
 
         for did, _ in days_touched:
             _recompute(cur, did)
