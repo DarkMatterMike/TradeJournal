@@ -1297,3 +1297,66 @@ def update_settings(payload: dict):
             (Json(merged),))
         conn.commit()
         return merged
+
+# ── Tradovate endpoint probe ──────────────────────────
+@app.get('/tradovate/probe/{account_id}')
+def tradovate_probe(account_id: int):
+    """
+    Hit every plausible historical data endpoint and report what each returns.
+    Used to find which endpoints actually work with our OAuth token.
+    """
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized.')
+
+    results = {}
+    endpoints = [
+        f'cashBalanceLog/list',
+        f'cashBalanceLog/deps?masterid={account_id}',
+        f'cashBalance/list',
+        f'executionReport/list',
+        f'executionReport/deps?masterid={account_id}',
+        f'fill/list',
+        f'fillPair/list',
+        f'order/list',
+        f'order/deps?masterid={account_id}',
+        f'position/list',
+        f'tradingPermission/list',
+    ]
+
+    # Also try Reporting API
+    rpt_endpoints = [
+        f'fillPair/list',
+        f'fill/list',
+        f'cashBalanceLog/list',
+        f'cashBalanceLog/deps?masterid={account_id}',
+    ]
+
+    for ep in endpoints:
+        try:
+            data = tv._rest_get(ep)
+            if isinstance(data, list):
+                results[f'LIVE/{ep}'] = {
+                    'count': len(data),
+                    'sample': data[:2] if data else [],
+                    'keys': list(data[0].keys()) if data else [],
+                }
+            else:
+                results[f'LIVE/{ep}'] = {'data': data}
+        except Exception as e:
+            results[f'LIVE/{ep}'] = {'error': str(e)}
+
+    for ep in rpt_endpoints:
+        try:
+            data = tv._rpt_get(ep)
+            if isinstance(data, list):
+                results[f'RPT/{ep}'] = {
+                    'count': len(data),
+                    'sample': data[:2] if data else [],
+                    'keys': list(data[0].keys()) if data else [],
+                }
+            else:
+                results[f'RPT/{ep}'] = {'data': data}
+        except Exception as e:
+            results[f'RPT/{ep}'] = {'error': str(e)}
+
+    return results

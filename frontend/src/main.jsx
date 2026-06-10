@@ -795,6 +795,16 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     finally { setLoading(''); }
   };
 
+  const [probeResult, setProbeResult] = useState(null);
+
+  const runProbe = async () => {
+    if (!selectedAccount) return;
+    setLoading('probe');
+    try { setProbeResult(await api(`/tradovate/probe/${selectedAccount.id}`)); }
+    catch (e) { setStatus('Probe failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
   const authorized = syncStatus?.authorized;
 
   return <>
@@ -850,15 +860,42 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
     </div>}
 
     {selectedAccount && <div className="section">
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn btn--ghost" onClick={runPreview} disabled={!!loading}>
           {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview Trades
         </button>
         <button className="btn btn--primary" onClick={runSync} disabled={!!loading}>
           {loading === 'sync' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import Now
         </button>
+        <button className="btn btn--ghost" onClick={runProbe} disabled={!!loading} title="Probe all Tradovate endpoints to find which return data">
+          {loading === 'probe' ? <Loader2 size={13} className="spin" /> : <Activity size={13} />} Probe All Endpoints
+        </button>
       </div>
       <p style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 8 }}>Preview first. Import is idempotent — safe to re-run.</p>
+    </div>}
+
+    {probeResult && <div className="section">
+      <div className="section__head"><span className="section__title">Endpoint Probe Results</span></div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {Object.entries(probeResult).map(([ep, res]) => {
+          const hasData = res.count > 0;
+          const hasError = !!res.error;
+          return (
+            <div key={ep} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', padding: '8px 12px', background: hasData ? 'rgba(93,202,165,0.08)' : 'var(--surface-0)', borderRadius: 6, border: `1px solid ${hasData ? 'var(--green)' : 'var(--border)'}`, fontSize: 12 }}>
+              <code style={{ color: hasData ? 'var(--green)' : hasError ? 'var(--red)' : 'var(--text-3)', minWidth: 320, flexShrink: 0 }}>{ep}</code>
+              {hasData && <span style={{ color: 'var(--green)', fontWeight: 600 }}>✓ {res.count} records · keys: {res.keys?.join(', ')}</span>}
+              {hasError && <span style={{ color: 'var(--red)' }}>{res.error}</span>}
+              {!hasData && !hasError && <span style={{ color: 'var(--text-3)' }}>empty []</span>}
+            </div>
+          );
+        })}
+      </div>
+      {probeResult && <details style={{ marginTop: 12 }}>
+        <summary style={{ fontSize: 12, color: 'var(--text-3)', cursor: 'pointer' }}>Full raw response</summary>
+        <pre style={{ fontSize: 10, color: 'var(--text-2)', marginTop: 8, overflow: 'auto', background: 'var(--surface-0)', padding: 12, borderRadius: 6, maxHeight: 400 }}>
+          {JSON.stringify(probeResult, null, 2)}
+        </pre>
+      </details>}
     </div>}
 
     {preview && <div className="section">
