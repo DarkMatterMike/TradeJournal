@@ -449,6 +449,100 @@ def find_similar(day_id: int, limit: int = 10):
 
 # ── Step 4: Query endpoint ───────────────────────────
 
+@app.post('/intelligence/bulk')
+def bulk_intelligence(payload: dict = {}):
+    """
+    Run intelligence on all days that don't have an AI summary yet.
+    Processes up to `limit` days per call (default 50) to avoid timeout.
+    Returns counts of processed, skipped, and errors.
+    Call repeatedly until remaining=0 to process all days.
+    """
+    if not has_ai():
+        raise HTTPException(503, 'AI not configured. Set OPENAI_API_KEY.')
+
+    limit = min(int(payload.get('limit', 50)), 100)
+    skip_existing = payload.get('skip_existing', True)  # skip days already analyzed
+
+    with get_conn() as conn, conn.cursor() as cur:
+        if skip_existing:
+            cur.execute('''SELECT id, trade_date FROM trading_days
+                WHERE (ai_summary IS NULL OR ai_summary = '')
+                ORDER BY trade_date DESC LIMIT %s''', (limit,))
+        else:
+            cur.execute('SELECT id, trade_date FROM trading_days ORDER BY trade_date DESC LIMIT %s', (limit,))
+        days_to_process = cur.fetchall()
+
+        # Count remaining (for progress reporting)
+        cur.execute("SELECT COUNT(*) as total FROM trading_days WHERE ai_summary IS NULL OR ai_summary = ''")
+        remaining_before = cur.fetchone()['total']
+
+    processed = 0
+    skipped = 0
+    errors = []
+
+    for day_row in days_to_process:
+        day_id = day_row['id']
+        try:
+            bundle = get_day(day_id)
+            intel = summarize_day(bundle['day'], bundle['uploads'], bundle['trade_rows'])
+
+            scores = intel.get('execution_scores', {})
+            pattern_tags = intel.get('pattern_tags', [])
+            pattern_tags_str = ', '.join(pattern_tags) if isinstance(pattern_tags, list) else str(pattern_tags)
+
+            text = json.dumps({'day': bundle['day'], 'intel': intel,
+                               'trades': bundle['trade_rows'][:50]}, default=str)
+            emb = embed_text(text)
+
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute('''UPDATE trading_days SET
+                    ai_summary=%s, ai_setup_tags=%s, ai_pattern_tags=%s,
+                    ai_market_structure=%s, ai_execution_review=%s,
+                    execution_score=%s, bias_score=%s, patience_score=%s,
+                    entry_score=%s, risk_mgmt_score=%s, profit_taking_score=%s,
+                    biggest_mistake=%s, biggest_strength=%s,
+                    lessons=CASE WHEN lessons='' THEN %s ELSE lessons END,
+                    updated_at=NOW()
+                    WHERE id=%s''', (
+                    intel.get('summary', ''),
+                    intel.get('setup_tags', pattern_tags_str),
+                    pattern_tags_str,
+                    Json(intel.get('market_structure', {})),
+                    Json(intel.get('execution_review', {})),
+                    scores.get('overall'), scores.get('bias'), scores.get('patience'),
+                    scores.get('entry'), scores.get('risk_management'), scores.get('profit_taking'),
+                    intel.get('biggest_mistake', ''), intel.get('biggest_strength', ''),
+                    intel.get('lessons', ''), day_id,
+                ))
+
+                # Auto-link patterns
+                _auto_link_patterns(cur, day_id, pattern_tags, confidence=0.8)
+
+                # Store embedding
+                if emb:
+                    cur.execute('DELETE FROM ai_embeddings WHERE day_id=%s AND embedding_type=%s',
+                                (day_id, 'intelligence'))
+                    cur.execute('INSERT INTO ai_embeddings(day_id,embedding_type,content,embedding) VALUES(%s,%s,%s,%s)',
+                                (day_id, 'intelligence', text[:8000], emb))
+                conn.commit()
+
+            processed += 1
+
+        except Exception as e:
+            errors.append(f'Day {day_id} ({day_row["trade_date"]}): {str(e)[:100]}')
+
+    remaining_after = remaining_before - processed
+
+    return {
+        'processed': processed,
+        'skipped': skipped,
+        'errors': errors,
+        'remaining': max(0, remaining_after),
+        'done': remaining_after <= 0,
+    }
+
+
+
 @app.get('/query')
 def query_days(
     pattern: str = '',
