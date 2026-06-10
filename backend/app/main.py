@@ -988,6 +988,19 @@ def tradovate_status():
     return tv.get_status()
 
 
+@app.post('/tradovate/disconnect')
+def tradovate_disconnect():
+    """Clear stored OAuth token, freeing up the active session slot."""
+    tv._mem_token.clear()
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM app_settings WHERE key='tradovate_oauth_token'")
+            conn.commit()
+    except Exception:
+        pass
+    return {'disconnected': True}
+
+
 @app.get('/tradovate/oauth/start')
 def tradovate_oauth_start():
     """Redirect browser to Tradovate authorization page."""

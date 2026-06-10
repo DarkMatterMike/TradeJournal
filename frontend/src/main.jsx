@@ -849,6 +849,13 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
             Re-authorize (update scopes)
           </a>
         )}
+        {authorized && (
+          <button className="btn btn--danger" style={{ fontSize: 12 }} onClick={async () => {
+            if (!confirm('Disconnect Tradovate? This clears the stored token and frees your active session slot.')) return;
+            try { await api('/tradovate/disconnect', { method: 'POST', body: '{}' }); await loadStatus(); setAccounts([]); setSelectedAccount(null); }
+            catch (e) { setStatus('Failed: ' + e.message); }
+          }}>Disconnect</button>
+        )}
         {authorized && accounts.length === 0 && (
           <button className="btn btn--ghost" onClick={loadAccounts} disabled={loading === 'accounts'}>
             {loading === 'accounts' ? <Loader2 size={13} className="spin" /> : null} List Accounts
