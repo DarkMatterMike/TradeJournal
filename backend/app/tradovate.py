@@ -191,25 +191,21 @@ def fetch_fill_pairs(account_id: int) -> dict:
             fill_ids = list(dict.fromkeys(fill_ids))  # deduplicate, preserve order
 
             if fill_ids:
-                # Batch fetch fills in chunks of 100
+                # fill/ldeps returns 401 — use fill/item individually instead
                 fills = []
-                chunk_size = 100
-                for i in range(0, len(fill_ids), chunk_size):
-                    chunk = ','.join(fill_ids[i:i+chunk_size])
+                for fid in fill_ids:
                     try:
-                        batch = _rest_get('fill/ldeps', {'masterids': chunk})
-                        if isinstance(batch, list):
-                            fills.extend(batch)
+                        f = _rest_get(f'fill/item', {'id': fid})
+                        if isinstance(f, dict) and f.get('id'):
+                            fills.append(f)
                     except Exception as e:
-                        # Try individual fetch as fallback
-                        for fid in fill_ids[i:i+chunk_size]:
-                            try:
-                                f = _rest_get(f'fill/item?id={fid}')
-                                if isinstance(f, dict) and f.get('id'):
-                                    fills.append(f)
-                            except Exception:
-                                pass
-                        errors.append(f'fill/ldeps chunk {i}: {e}')
+                        # Also try without params
+                        try:
+                            f = _rest_get(f'fill/item?id={fid}')
+                            if isinstance(f, dict) and f.get('id'):
+                                fills.append(f)
+                        except Exception:
+                            pass
 
                 if fills:
                     result['fills'] = fills

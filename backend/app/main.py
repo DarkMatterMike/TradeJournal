@@ -1313,11 +1313,15 @@ def tradovate_probe(account_id: int):
         f'executionReport/list',
         f'executionReport/deps?masterid={account_id}',
         f'fill/list',
+        f'fill/item?id=16137513007',  # known fillId from cashBalanceLog
+        f'fill/ldeps?masterids=16137513007',
+        f'fill/find?name=16137513007',
         f'fillPair/list',
+        f'fillPair/item?id=16137513007',
         f'order/list',
         f'order/deps?masterid={account_id}',
+        f'order/item?id=16137513007',
         f'position/list',
-        f'tradingPermission/list',
     ]
 
     # Also try Reporting API
