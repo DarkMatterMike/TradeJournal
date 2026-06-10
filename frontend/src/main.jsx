@@ -360,7 +360,14 @@ function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar__brand">
-          <div className="sidebar__logo"><span className="sidebar__logo-dot" /> Trading Intelligence</div>
+          <div className="sidebar__logo">
+            <div className="sidebar__logo-mark">
+              <svg viewBox="0 0 14 14" xmlns="http://www.w3.org/2000/svg">
+                <polyline points="1,10 4,5 7,8 10,3 13,6" stroke="black" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            Trading Intelligence
+          </div>
           <div className="sidebar__sub">Pattern recognition system</div>
         </div>
         <nav className="sidebar__nav">
@@ -384,7 +391,7 @@ function App() {
             <div className="section">
               <div className="section__head"><span className="section__title">Recent Days</span><span className="section__link" onClick={() => setPage('days')}>View all</span></div>
               <div className="day-list">
-                {(stats?.recent_days || []).map(dy => <button key={dy.id} className="day-row" onClick={() => openDay(dy.id)}><span className="day-row__date">{fmt(dy.trade_date)}</span><span className="day-row__ticker">{dy.tickers || dy.title || 'Untitled'}</span><span className="day-row__tags">{dy.ai_pattern_tags || dy.tags || ''}</span><span className={`day-row__pnl ${pnlC(dy.pnl)}`}>{dy.pnl != null ? pnl$(dy.pnl) : '—'}</span><span className="day-row__score">{dy.execution_score != null ? Math.round(dy.execution_score) : '—'}</span><ChevronRight size={14} className="day-row__arrow" /></button>)}
+                {(stats?.recent_days || []).map((dy, i) => <button key={dy.id} className="day-row" style={{ animationDelay: `${i * 0.04}s` }} onClick={() => openDay(dy.id)}><span className="day-row__date">{fmt(dy.trade_date)}</span><span className="day-row__ticker">{dy.tickers || dy.title || 'Untitled'}</span><span className="day-row__tags">{dy.ai_pattern_tags || dy.tags || ''}</span><span className={`day-row__pnl ${pnlC(dy.pnl)}`}>{dy.pnl != null ? pnl$(dy.pnl) : '—'}</span><span className="day-row__score">{dy.execution_score != null ? Math.round(dy.execution_score) : '—'}</span><ChevronRight size={14} className="day-row__arrow" /></button>)}
               </div>
             </div>
             <div className="section">
