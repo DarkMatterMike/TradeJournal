@@ -353,6 +353,7 @@ function App() {
     { id: 'intel', icon: Sparkles, label: 'Intelligence' },
     { id: 'patterns', icon: Layers, label: 'Patterns' },
     { id: 'sync', icon: Activity, label: 'Tradovate Sync' },
+    { id: 'settings', icon: Pencil, label: 'Settings' },
   ];
 
   return (
@@ -736,6 +737,7 @@ function App() {
 
           {/* ── TRADOVATE SYNC ───────────── */}
           {page === 'sync' && <TradovateSyncPage onOpenDay={openDay} setStatus={setStatus} />}
+          {page === 'settings' && <SettingsPage setStatus={setStatus} />}
 
         </div>
       </div>
@@ -906,8 +908,210 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
       {syncResult.message && <p style={{ fontSize: 13, color: 'var(--text-2)', marginTop: 8 }}>{syncResult.message}</p>}
       {syncResult.errors?.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--amber)', marginTop: 4 }}>{e}</div>)}
     </div>}
+
+    {/* ── CSV Import ── */}
+    <CsvImportSection setStatus={setStatus} />
   </>;
 }
+// ── Settings Page ─────────────────────────────────────
+function SettingsPage({ setStatus }) {
+  const [settings, setSettings] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api('/settings').then(setSettings).catch(() => setSettings({}));
+  }, []);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api('/settings', { method: 'PUT', body: JSON.stringify(settings) });
+      setStatus('Settings saved');
+    } catch (e) {
+      setStatus('Failed to save: ' + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const s = (k, v) => setSettings(prev => ({ ...prev, [k]: v }));
+
+  if (!settings) return <div style={{ padding: 40, color: 'var(--text-3)' }}>Loading...</div>;
+
+  return <>
+    <div className="page-header">
+      <h1 className="page-header__title">Settings</h1>
+      <p className="page-header__sub">Journal preferences and calculation defaults</p>
+    </div>
+
+    <div className="section">
+      <div className="section__head"><span className="section__title">Commission & Fees</span></div>
+      <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 16 }}>
+        Applied automatically to all imported trades (CSV and future syncs). 
+        Enters as cost per contract per side — so a round trip costs 2× this amount.
+      </p>
+      <div className="field-grid field-grid--3">
+        <label className="field">
+          <span className="field__label">Commission per side (per contract)</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ color: 'var(--text-3)', fontSize: 14 }}>$</span>
+            <input className="field__input" type="number" step="0.01" min="0"
+              value={settings.commission_per_side ?? 0}
+              onChange={e => s('commission_per_side', parseFloat(e.target.value) || 0)} />
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4, display: 'block' }}>
+            e.g. Tradovate: $0.79/side · NinjaTrader: $0.09/side · Rithmic: varies
+          </span>
+        </label>
+        <label className="field">
+          <span className="field__label">Broker</span>
+          <select className="field__input" value={settings.default_broker || 'Tradovate'}
+            onChange={e => {
+              s('default_broker', e.target.value);
+              // Auto-fill known commission rates
+              const rates = { Tradovate: 0.79, NinjaTrader: 0.09, Rithmic: 0.0 };
+              if (rates[e.target.value] !== undefined) s('commission_per_side', rates[e.target.value]);
+            }}>
+            <option>Tradovate</option>
+            <option>NinjaTrader</option>
+            <option>Rithmic</option>
+            <option>Other</option>
+          </select>
+        </label>
+        <label className="field">
+          <span className="field__label">Timezone</span>
+          <select className="field__input" value={settings.timezone || 'America/Chicago'}
+            onChange={e => s('timezone', e.target.value)}>
+            <option value="America/New_York">Eastern (ET)</option>
+            <option value="America/Chicago">Central (CT)</option>
+            <option value="America/Denver">Mountain (MT)</option>
+            <option value="America/Los_Angeles">Pacific (PT)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div className="section">
+      <div className="section__head"><span className="section__title">Point Values</span></div>
+      <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 12 }}>
+        Used for P&L calculation when not provided by the broker. These are standard CME values.
+      </p>
+      <table className="pattern-table">
+        <thead><tr><th>Contract</th><th>Product</th><th>$/Point</th><th>Tick Size</th><th>$/Tick</th></tr></thead>
+        <tbody>
+          {[
+            ['MNQ', 'Micro E-mini NASDAQ', 2.0, 0.25, 0.50],
+            ['NQ',  'E-mini NASDAQ',      20.0, 0.25, 5.00],
+            ['MES', 'Micro E-mini S&P',    5.0, 0.25, 1.25],
+            ['ES',  'E-mini S&P',         50.0, 0.25, 12.50],
+            ['MYM', 'Micro E-mini Dow',    0.5, 1.0,  0.50],
+            ['YM',  'E-mini Dow',          5.0, 1.0,  5.00],
+            ['M2K', 'Micro E-mini Russell', 5.0, 0.1,  0.50],
+            ['RTY', 'E-mini Russell',      50.0, 0.1,  5.00],
+          ].map(([sym, name, ppnt, tick, ptick]) => (
+            <tr key={sym}>
+              <td style={{ fontWeight: 600 }}>{sym}</td>
+              <td style={{ color: 'var(--text-2)' }}>{name}</td>
+              <td className="mono">${ppnt.toFixed(2)}</td>
+              <td className="mono">{tick}</td>
+              <td className="mono">${ptick.toFixed(2)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+
+    <div style={{ marginTop: 8 }}>
+      <button className="btn btn--primary" onClick={save} disabled={saving}>
+        {saving ? <Loader2 size={14} className="spin" /> : <Check size={14} />} Save Settings
+      </button>
+    </div>
+  </>;
+}
+
+
+// ── CSV Import Section ────────────────────────────────
+function CsvImportSection({ setStatus }) {
+  const [csvPreview, setCsvPreview] = useState(null);
+  const [csvResult, setCsvResult] = useState(null);
+  const [loading, setLoading] = useState('');
+  const fileRef = useRef();
+
+  const handleFile = async (file, previewOnly) => {
+    if (!file) return;
+    const label = previewOnly ? 'preview' : 'import';
+    setLoading(label);
+    if (previewOnly) setCsvPreview(null); else setCsvResult(null);
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('preview_only', previewOnly ? 'true' : 'false');
+    try {
+      const result = await api('/tradovate/import-csv', { method: 'POST', body: fd });
+      if (previewOnly) setCsvPreview(result);
+      else { setCsvResult(result); setCsvPreview(null); setStatus(`Imported ${result.imported} trades across ${result.days_updated} days`); }
+    } catch (e) { setStatus(`CSV ${label} failed: ${e.message}`); }
+    finally { setLoading(''); if (fileRef.current) fileRef.current.value = ''; }
+  };
+
+  return <div className="section" style={{ marginTop: 24, borderTop: '1px solid var(--border)', paddingTop: 24 }}>
+    <div className="section__head">
+      <span className="section__title">CSV Import</span>
+      <span style={{ fontSize: 12, color: 'var(--text-3)' }}>Tradovate → Reports → Orders → Download</span>
+    </div>
+    <p style={{ fontSize: 13, color: 'var(--text-2)', marginBottom: 16 }}>
+      Export your Orders CSV from Tradovate and upload here. Works for any date range — use for full history backfill.
+    </p>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <label className="btn btn--ghost" style={{ cursor: 'pointer' }}>
+        {loading === 'preview' ? <Loader2 size={13} className="spin" /> : <Search size={13} />} Preview CSV
+        <input ref={fileRef} type="file" accept=".csv" hidden onChange={e => handleFile(e.target.files[0], true)} />
+      </label>
+      <label className="btn btn--primary" style={{ cursor: 'pointer' }}>
+        {loading === 'import' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import CSV
+        <input type="file" accept=".csv" hidden onChange={e => handleFile(e.target.files[0], false)} />
+      </label>
+    </div>
+
+    {csvPreview && <div style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 10, display: 'flex', gap: 20, flexWrap: 'wrap' }}>
+        <span>Filled orders: <strong style={{ color: 'var(--text-1)' }}>{csvPreview.raw_filled_count}</strong></span>
+        <span>Round trips: <strong style={{ color: 'var(--text-1)' }}>{csvPreview.total_trades}</strong></span>
+        <span>Total P&L: <strong className={pnlC(csvPreview.total_pnl)}>{pnl$(csvPreview.total_pnl)}</strong></span>
+        <span>Dates: <strong style={{ color: 'var(--text-1)' }}>{csvPreview.dates?.length}</strong></span>
+      </div>
+      <div className="trade-table-wrap">
+        <table className="trade-table">
+          <thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Entry Time</th></tr></thead>
+          <tbody>{(csvPreview.trades || []).map((t, i) => (
+            <tr key={i}>
+              <td>{t.trade_date}</td><td style={{ fontWeight: 500 }}>{t.symbol}</td>
+              <td style={{ color: t.side === 'Long' ? 'var(--green)' : 'var(--red)' }}>{t.side}</td>
+              <td>{t.qty}</td><td className="mono">{t.entry_price?.toFixed(2)}</td>
+              <td className="mono">{t.exit_price?.toFixed(2)}</td>
+              <td className={`mono ${pnlC(t.pnl)}`}>{pnl$(t.pnl)}</td>
+              <td style={{ fontSize: 11, color: 'var(--text-3)' }}>{t.entry_time ? fmtTs(t.entry_time) : '—'}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <label className="btn btn--primary" style={{ marginTop: 12, cursor: 'pointer' }} disabled={loading === 'import'}>
+        {loading === 'import' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import These {csvPreview.total_trades} Trades
+        <input type="file" accept=".csv" hidden onChange={e => handleFile(e.target.files[0], false)} />
+      </label>
+    </div>}
+
+    {csvResult && <div style={{ marginTop: 16 }}>
+      <div className="stat-grid">
+        <div className="stat-card"><div className="stat-card__label">Imported</div><div className="stat-card__value positive">{csvResult.imported}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Skipped</div><div className="stat-card__value">{csvResult.skipped}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Days Updated</div><div className="stat-card__value">{csvResult.days_updated}</div></div>
+        <div className="stat-card"><div className="stat-card__label">Total P&L</div><div className={`stat-card__value ${pnlC(csvResult.total_pnl)}`}>{pnl$(csvResult.total_pnl)}</div></div>
+      </div>
+      {csvResult.errors?.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--amber)', marginTop: 4 }}>{e}</div>)}
+    </div>}
+  </div>;
+}
+
 function DayAnalysesTab({ dayId, onOpenDay, setStatus }) {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);

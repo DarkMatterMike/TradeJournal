@@ -986,3 +986,314 @@ def tradovate_sync(account_id: int):
         raise HTTPException(503, str(e))
     except Exception as e:
         raise HTTPException(502, f'Sync failed: {e}')
+
+
+# ── Tradovate CSV Import ──────────────────────────────
+
+POINT_VALUES = {
+    # MNQ / NQ
+    'MNQ': 2.0, 'NQ': 20.0,
+    # MES / ES
+    'MES': 5.0, 'ES': 50.0,
+    # MYM / YM
+    'MYM': 0.5, 'YM': 5.0,
+    # M2K / RTY
+    'M2K': 5.0, 'RTY': 50.0,
+    # CL, GC, SI, etc. — $1 default, user can correct
+}
+
+def _get_point_value(product: str) -> float:
+    """Return dollar value per point for a product code."""
+    prod = (product or '').strip().upper()
+    for k, v in POINT_VALUES.items():
+        if prod == k or prod.startswith(k):
+            return v
+    return 1.0
+
+
+def _parse_tradovate_orders_csv(content: str, commission_per_side: float = 0.0) -> dict:
+    """
+    Parse a Tradovate Orders CSV export and pair fills into round-trip trades.
+
+    CSV columns (confirmed from live export):
+    orderId, Account, Order ID, B/S, Contract, Product, Product Description,
+    avgPrice, filledQty, Fill Time, lastCommandId, Status, ..., Date, ...
+
+    Strategy:
+    - Keep only Filled rows with a fill price and fill time
+    - Group by Product (e.g. MNQ) within the same day
+    - Pair sells and buys chronologically into round trips
+    - Determine direction from which side came first
+    """
+    reader = csv.DictReader(io.StringIO(content))
+    rows = list(reader)
+
+    # Normalize column names (strip spaces)
+    def norm(r):
+        return {k.strip(): v.strip() for k, v in r.items()}
+    rows = [norm(r) for r in rows]
+
+    # Keep only filled rows with price and time
+    filled = []
+    for r in rows:
+        status = r.get('Status', '')
+        price_str = r.get('avgPrice') or r.get('Avg Fill Price', '')
+        fill_time_str = r.get('Fill Time', '')
+        qty_str = r.get('filledQty') or r.get('Filled Qty', '')
+        if 'Filled' not in status:
+            continue
+        if not price_str or not fill_time_str or not qty_str:
+            continue
+        try:
+            price = float(price_str.replace(',', ''))
+            qty   = float(qty_str.replace(',', ''))
+        except ValueError:
+            continue
+        # Parse fill time: "06/09/2026 10:14:25"
+        fill_dt = None
+        for fmt in ('%m/%d/%Y %H:%M:%S', '%m/%d/%y %H:%M:%S'):
+            try:
+                from datetime import datetime, timezone
+                fill_dt = datetime.strptime(fill_time_str.strip(), fmt)
+                break
+            except ValueError:
+                continue
+        if not fill_dt:
+            continue
+
+        side    = r.get('B/S', '').strip()
+        product = r.get('Product', '').strip()
+        contract= r.get('Contract', '').strip()
+
+        filled.append({
+            'order_id':   r.get('orderId', '').strip(),
+            'side':       side,   # ' Buy' or ' Sell' (note leading space)
+            'product':    product,
+            'contract':   contract,
+            'price':      price,
+            'qty':        qty,
+            'fill_dt':    fill_dt,
+            'trade_date': fill_dt.strftime('%Y-%m-%d'),
+        })
+
+    # Sort by fill time
+    filled.sort(key=lambda x: x['fill_dt'])
+
+    # Group by date + product, then pair into round trips
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for f in filled:
+        groups[(f['trade_date'], f['product'])].append(f)
+
+    trades = []
+    for (trade_date, product), fills in groups.items():
+        point_value = _get_point_value(product)
+        buys  = [f for f in fills if 'Buy'  in f['side']]
+        sells = [f for f in fills if 'Sell' in f['side']]
+
+        # Pair sells and buys using FIFO matching
+        # We need to determine open vs close for each fill
+        # Simple approach: sort by time, track running position
+        position = 0.0
+        opens = []  # stack of open fills
+        paired = []
+
+        for f in fills:
+            is_buy = 'Buy' in f['side']
+            qty    = f['qty']
+
+            if position == 0:
+                # Opening a new position
+                opens = [{'fill': f, 'qty': qty}]
+                position = qty if is_buy else -qty
+            elif (position > 0 and is_buy) or (position < 0 and not is_buy):
+                # Adding to existing position
+                opens.append({'fill': f, 'qty': qty})
+                position += qty if is_buy else -qty
+            else:
+                # Closing / reducing position
+                remaining = qty
+                while remaining > 0 and opens:
+                    open_fill = opens[0]
+                    match_qty = min(remaining, open_fill['qty'])
+
+                    entry_fill = open_fill['fill']
+                    exit_fill  = f
+                    long_trade = position > 0
+
+                    if long_trade:
+                        entry_price = entry_fill['price']
+                        exit_price  = exit_fill['price']
+                    else:
+                        entry_price = entry_fill['price']  # sell price (short entry)
+                        exit_price  = exit_fill['price']   # buy price  (short exit)
+
+                    direction = 1 if long_trade else -1
+                    gross_pnl = round(direction * (exit_price - entry_price) * match_qty * point_value, 2)
+                    # Commission: 2 sides (entry + exit) × qty × per-side rate
+                    commission = round(2 * match_qty * commission_per_side, 2)
+                    pnl = round(gross_pnl - commission, 2)
+
+                    paired.append({
+                        'tradovate_csv_order_ids': f"{entry_fill['order_id']}_{exit_fill['order_id']}",
+                        'symbol':       entry_fill['contract'],
+                        'product':      product,
+                        'side':         'Long' if long_trade else 'Short',
+                        'qty':          match_qty,
+                        'entry_price':  entry_price,
+                        'exit_price':   exit_price,
+                        'gross_pnl':    gross_pnl,
+                        'commission':   commission,
+                        'pnl':          pnl,
+                        'entry_time':   entry_fill['fill_dt'].isoformat(),
+                        'exit_time':    exit_fill['fill_dt'].isoformat(),
+                        'trade_date':   trade_date,
+                        'point_value':  point_value,
+                        'source':       'tradovate_csv',
+                    })
+
+                    open_fill['qty'] -= match_qty
+                    remaining        -= match_qty
+                    position         -= match_qty if long_trade else -match_qty
+                    if open_fill['qty'] <= 0:
+                        opens.pop(0)
+
+                if remaining > 0:
+                    # Still have unfilled close — add as new open in opposite direction
+                    opens.append({'fill': f, 'qty': remaining})
+                    position += remaining if is_buy else -remaining
+
+        trades.extend(paired)
+
+    # Summary by date
+    by_date = defaultdict(list)
+    for t in trades:
+        by_date[t['trade_date']].append(t)
+
+    return {
+        'trades':       trades,
+        'by_date':      dict(by_date),
+        'total_trades': len(trades),
+        'total_pnl':    round(sum(t['pnl'] for t in trades), 2),
+        'dates':        sorted(by_date.keys()),
+        'raw_filled_count': len(filled),
+    }
+
+
+@app.post('/tradovate/import-csv')
+async def tradovate_import_csv(
+    file: UploadFile = File(...),
+    preview_only: bool = Form(False),
+):
+    """Parse a Tradovate Orders CSV and import round-trip trades with commission applied."""
+    content = await file.read()
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        text = content.decode('latin-1')
+
+    # Load commission setting
+    settings = _get_settings()
+    commission_per_side = float(settings.get('commission_per_side', 0.0))
+
+    parsed = _parse_tradovate_orders_csv(text, commission_per_side=commission_per_side)
+
+    if preview_only:
+        return {**parsed, 'preview_only': True}
+
+    # Write to DB
+    imported = 0
+    skipped  = 0
+    errors   = []
+    days_touched = set()
+
+    with get_conn() as conn, conn.cursor() as cur:
+        for trade in parsed['trades']:
+            try:
+                # Idempotency key
+                key = trade['tradovate_csv_order_ids']
+                cur.execute(
+                    "SELECT id FROM trade_rows WHERE row_data->>'tradovate_csv_order_ids'=%s",
+                    (key,)
+                )
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+
+                td = trade['trade_date']
+                # Get or create trading day
+                cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (td,))
+                day_row = cur.fetchone()
+                if not day_row:
+                    cur.execute(
+                        'INSERT INTO trading_days (trade_date,tickers,title) VALUES (%s,%s,%s) ON CONFLICT (trade_date) DO NOTHING RETURNING id',
+                        (td, trade.get('product',''), f'Auto-imported {td}')
+                    )
+                    day_row = cur.fetchone()
+                    if not day_row:
+                        cur.execute('SELECT id FROM trading_days WHERE trade_date=%s', (td,))
+                        day_row = cur.fetchone()
+
+                if day_row:
+                    day_id = day_row['id']
+                    cur.execute('INSERT INTO trade_rows (day_id,row_data) VALUES (%s,%s)',
+                                (day_id, Json(trade)))
+                    days_touched.add((day_id, td))
+                    imported += 1
+                else:
+                    errors.append(f'Could not create day for {td}')
+
+            except Exception as e:
+                errors.append(f'Trade {trade.get("tradovate_csv_order_ids")}: {e}')
+
+        # Recompute day stats
+        for day_id, _ in days_touched:
+            cur.execute(
+                """UPDATE trading_days SET
+                   pnl=(SELECT SUM((row_data->>'pnl')::float) FROM trade_rows
+                        WHERE day_id=%s AND row_data->>'pnl' IS NOT NULL),
+                   num_trades=(SELECT COUNT(*) FROM trade_rows WHERE day_id=%s),
+                   win_count=(SELECT COUNT(*) FROM trade_rows WHERE day_id=%s AND (row_data->>'pnl')::float>0),
+                   loss_count=(SELECT COUNT(*) FROM trade_rows WHERE day_id=%s AND (row_data->>'pnl')::float<0),
+                   updated_at=NOW()
+                   WHERE id=%s""",
+                (day_id, day_id, day_id, day_id, day_id)
+            )
+        conn.commit()
+
+    return {
+        'imported':     imported,
+        'skipped':      skipped,
+        'days_updated': len(days_touched),
+        'errors':       errors,
+        'total_pnl':    parsed['total_pnl'],
+        'dates':        parsed['dates'],
+    }
+
+
+# ── App Settings ─────────────────────────────────────
+
+def _get_settings() -> dict:
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key='user_settings'")
+        row = cur.fetchone()
+        return row['value'] if row else {}
+
+@app.get('/settings')
+def get_settings():
+    return _get_settings()
+
+@app.put('/settings')
+def update_settings(payload: dict):
+    with get_conn() as conn, conn.cursor() as cur:
+        # Merge with existing
+        cur.execute("SELECT value FROM app_settings WHERE key='user_settings'")
+        row = cur.fetchone()
+        existing = row['value'] if row else {}
+        merged = {**existing, **payload}
+        cur.execute('''INSERT INTO app_settings (key, value, updated_at)
+            VALUES ('user_settings', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()''',
+            (Json(merged),))
+        conn.commit()
+        return merged

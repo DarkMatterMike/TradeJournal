@@ -162,11 +162,43 @@ def get_cash_balance(account_id: int) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+RPT_BASE    = 'https://rpt-live.tradovateapi.com/v1'
+
+
+def _rpt_get(endpoint: str, params: dict = None):
+    """Call the Tradovate Reporting API with the same OAuth token."""
+    token = _get_valid_token()
+    resp = httpx.get(f'{RPT_BASE}/{endpoint}',
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_fill_pairs(account_id: int) -> dict:
     result = {'fillPairs': [], 'fills': [], 'contracts': [], 'orders': []}
     errors = []
 
-    # 1. Direct fillPair/list (OAuth gives full historical access)
+    # 0. Try Reporting API first — this is what Tradovate support recommends
+    #    for historical data load. Uses same OAuth token.
+    try:
+        fps = _rpt_get('fillPair/list')
+        if isinstance(fps, list) and fps:
+            result['fillPairs'] = fps
+            logger.info(f'RPT fillPair/list: {len(fps)} pairs')
+    except Exception as e:
+        errors.append(f'RPT fillPair/list: {e}')
+
+    if not result['fillPairs']:
+        try:
+            fills = _rpt_get('fill/list')
+            if isinstance(fills, list) and fills:
+                result['fills'] = fills
+                logger.info(f'RPT fill/list: {len(fills)} fills')
+        except Exception as e:
+            errors.append(f'RPT fill/list: {e}')
+
+    # 1. Fall back to Live API fillPair/list
     try:
         fps = _rest_get('fillPair/list')
         if isinstance(fps, list):

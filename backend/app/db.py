@@ -1,6 +1,7 @@
 import os
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -68,6 +69,22 @@ def init_db():
           pattern_id INTEGER REFERENCES playbook_patterns(id) ON DELETE CASCADE,
           confidence REAL DEFAULT 0, notes TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(day_id, pattern_id)
         );''')
+        cur.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value JSONB NOT NULL DEFAULT '{}'::jsonb,
+          updated_at TIMESTAMPTZ DEFAULT NOW()
+        );''')
+        # Seed default settings if not present
+        cur.execute('''
+        INSERT INTO app_settings (key, value) VALUES ('user_settings', %s)
+        ON CONFLICT (key) DO NOTHING
+        ''', (Json({
+            'commission_per_side': 0.0,
+            'commission_currency': 'USD',
+            'default_broker': 'Tradovate',
+            'timezone': 'America/Chicago',
+        }),))
 
         # ── Step 1: Performance metrics + structured AI columns ──
         migrations = [
