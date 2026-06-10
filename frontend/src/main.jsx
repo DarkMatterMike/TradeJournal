@@ -1019,7 +1019,7 @@ function BulkIntelligenceButton({ setStatus, onDone }) {
 
   const stop = () => { abortRef.current = true; setStatus('Stopping after current batch…'); };
 
-  return <div style={{ display: 'flex', flex-direction: 'column', alignItems: 'flex-end', gap: 8 }}>
+  return <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
     <div style={{ display: 'flex', gap: 8 }}>
       {!running
         ? <button className="btn btn--amber" onClick={run}><Brain size={14} /> Run Bulk Intelligence</button>
