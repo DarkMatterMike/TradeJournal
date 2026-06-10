@@ -157,7 +157,7 @@ def calendar_data(year: int = None, month: int = None):
     with get_conn() as conn, conn.cursor() as cur:
         if year and month:
             cur.execute('''
-                SELECT id, trade_date, pnl, num_trades, win_count, loss_count,
+                SELECT id, trade_date::text, pnl, num_trades, win_count, loss_count,
                        execution_score, ai_pattern_tags, tags, tickers
                 FROM trading_days
                 WHERE date_trunc('month', trade_date) = make_date(%s, %s, 1)
@@ -165,7 +165,7 @@ def calendar_data(year: int = None, month: int = None):
             ''', (year, month))
         else:
             cur.execute('''
-                SELECT id, trade_date, pnl, num_trades, win_count, loss_count,
+                SELECT id, trade_date::text, pnl, num_trades, win_count, loss_count,
                        execution_score, ai_pattern_tags, tags, tickers
                 FROM trading_days
                 WHERE trade_date >= (CURRENT_DATE - INTERVAL '13 months')
