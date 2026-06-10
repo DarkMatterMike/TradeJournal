@@ -833,6 +833,12 @@ function TradovateSyncPage({ onOpenDay, setStatus }) {
             Connect Tradovate Account →
           </a>
         )}
+        {authorized && (
+          <a href={`${API}/tradovate/oauth/start`} target="_blank" rel="noopener noreferrer"
+            className="btn btn--ghost" style={{ fontSize: 12, textDecoration: 'none' }}>
+            Re-authorize (update scopes)
+          </a>
+        )}
         {authorized && accounts.length === 0 && (
           <button className="btn btn--ghost" onClick={loadAccounts} disabled={loading === 'accounts'}>
             {loading === 'accounts' ? <Loader2 size={13} className="spin" /> : null} List Accounts
