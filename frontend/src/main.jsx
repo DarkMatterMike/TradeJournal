@@ -1157,22 +1157,28 @@ function CsvImportSection({ setStatus }) {
   const [csvPreview, setCsvPreview] = useState(null);
   const [csvResult, setCsvResult] = useState(null);
   const [loading, setLoading] = useState('');
+  const [pendingFile, setPendingFile] = useState(null);
   const fileRef = useRef();
 
   const handleFile = async (file, previewOnly) => {
     if (!file) return;
     const label = previewOnly ? 'preview' : 'import';
     setLoading(label);
-    if (previewOnly) setCsvPreview(null); else setCsvResult(null);
+    if (previewOnly) { setCsvPreview(null); setPendingFile(file); }
+    else setCsvResult(null);
     const fd = new FormData();
     fd.append('file', file);
     fd.append('preview_only', previewOnly ? 'true' : 'false');
     try {
       const result = await api('/tradovate/import-csv', { method: 'POST', body: fd });
       if (previewOnly) setCsvPreview(result);
-      else { setCsvResult(result); setCsvPreview(null); setStatus(`Imported ${result.imported} trades across ${result.days_updated} days`); }
+      else { setCsvResult(result); setCsvPreview(null); setPendingFile(null); setStatus(`Imported ${result.imported} trades across ${result.days_updated} days`); }
     } catch (e) { setStatus(`CSV ${label} failed: ${e.message}`); }
     finally { setLoading(''); if (fileRef.current) fileRef.current.value = ''; }
+  };
+
+  const importPending = () => {
+    if (pendingFile) handleFile(pendingFile, false);
   };
 
   return <div className="section" style={{ marginTop: 24, borderTop: '1px solid var(--border)', paddingTop: 24 }}>
@@ -1216,10 +1222,9 @@ function CsvImportSection({ setStatus }) {
           ))}</tbody>
         </table>
       </div>
-      <label className="btn btn--primary" style={{ marginTop: 12, cursor: 'pointer' }} disabled={loading === 'import'}>
+      <button className="btn btn--primary" style={{ marginTop: 12, cursor: 'pointer' }} disabled={loading === 'import'} onClick={importPending}>
         {loading === 'import' ? <Loader2 size={13} className="spin" /> : <ArrowUpRight size={13} />} Import These {csvPreview.total_trades} Trades
-        <input type="file" accept=".csv" hidden onChange={e => handleFile(e.target.files[0], false)} />
-      </label>
+      </button>
     </div>}
 
     {csvResult && <div style={{ marginTop: 16 }}>
