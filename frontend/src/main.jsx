@@ -189,8 +189,7 @@ function App() {
       <div className="field" aria-hidden="true" />
       <div className="grid-lines" aria-hidden="true" />
 
-      {/* telemetry ribbon */}
-      <Ribbon items={ribbonItems} />
+      {/* telemetry ribbon removed */}
 
       <div className="shell">
         {/* rail */}

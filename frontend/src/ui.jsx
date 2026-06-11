@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { pnl$, pnlC, MONTHS } from './api';
 
@@ -83,6 +83,13 @@ export function Toast({ status, onClear }) {
   if (!status) return null;
   const err = status.toLowerCase().includes('fail') || status.toLowerCase().includes('error');
   const loading = status.includes('...') || status.includes('…');
+
+  useEffect(() => {
+    if (!status || loading) return;
+    const t = setTimeout(onClear, 4000);
+    return () => clearTimeout(t);
+  }, [status, loading]);
+
   return (
     <div className={`toast ${err ? 'toast--error' : loading ? 'toast--loading' : 'toast--success'}`}>
       {loading && <Loader2 size={13} className="spin" />}

@@ -234,7 +234,7 @@ body {
   background-size: 100% 100%, 300% 100%;
   background-position: 0 0, 0 0;
   padding: 26px 28px;
-  animation: rise 0.55s ease both, holoflow 9s linear infinite;
+  animation: rise 0.55s ease both, holoflow 45s linear infinite;
 }
 @keyframes holoflow {
   to { background-position: 0 0, 300% 0; }
