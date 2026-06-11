@@ -34,15 +34,10 @@ function HeroPnl({ value }) {
   );
 }
 
-/* ── Equity curve from recent days' cumulative P&L ── */
-function heroCurve(days) {
-  const pts = (days || [])
-    .filter(d => d.pnl != null)
-    .slice(0, 12)
-    .reverse()
-    .reduce((acc, d) => { acc.push((acc.length ? acc[acc.length - 1] : 0) + d.pnl); return acc; }, []);
+/* ── Equity curve from stats.equity_curve (cumulative, chronological) ── */
+function heroCurve(equityCurve) {
+  const pts = (equityCurve || []).map(p => p.equity);
   if (pts.length < 2) {
-    // concept fallback path
     return {
       line: 'M0,150 L60,148 L110,158 L170,142 L230,168 L290,160 L350,178 L410,172 L470,185 L530,120 L590,58 L640,46',
       fill: 'M0,150 L60,148 L110,158 L170,142 L230,168 L290,160 L350,178 L410,172 L470,185 L530,120 L590,58 L640,46 L640,200 L0,200 Z',
@@ -52,7 +47,7 @@ function heroCurve(days) {
   const min = Math.min(...pts, 0), max = Math.max(...pts, 0);
   const span = max - min || 1;
   const xs = pts.map((_, i) => Math.round((i / (pts.length - 1)) * 640));
-  const ys = pts.map(p => Math.round(185 - ((p - min) / span) * 140));
+  const ys = pts.map(p => Math.round(185 - ((p - min) / span) * 160));
   const line = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x},${ys[i]}`).join(' ');
   return { line, fill: `${line} L640,200 L0,200 Z`, end: { x: xs[xs.length - 1], y: ys[ys.length - 1] } };
 }
@@ -111,7 +106,7 @@ export default function Dashboard({ stats, days, patterns, calendarData, calView
     return { pf, grossWin, grossLoss, best, worst, week, weekGreen, weekSessions, winCount, lossCount, wr };
   }, [trades, days, day]);
 
-  const curve = useMemo(() => heroCurve(days), [days]);
+  const curve = useMemo(() => heroCurve(stats?.equity_curve), [stats?.equity_curve]);
 
   /* edge index from patterns */
   const edge = useMemo(() => (patterns || []).filter(p => p.sample_count > 0).slice(0, 4), [patterns]);

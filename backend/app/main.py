@@ -146,7 +146,17 @@ def dashboard_stats():
         top_patterns = cur.fetchall()
         cur.execute('SELECT * FROM trading_days ORDER BY trade_date DESC LIMIT 10')
         recent = cur.fetchall()
-        return {'overview': overview, 'top_patterns': top_patterns, 'recent_days': recent}
+        # Equity curve — last 60 days ordered chronologically, cumulative P&L
+        cur.execute('''SELECT trade_date::text, pnl
+            FROM trading_days WHERE pnl IS NOT NULL
+            ORDER BY trade_date ASC LIMIT 60''')
+        eq_rows = cur.fetchall()
+        cumulative = 0.0
+        equity_curve = []
+        for r in eq_rows:
+            cumulative = round(cumulative + (r['pnl'] or 0), 2)
+            equity_curve.append({'date': r['trade_date'], 'equity': cumulative})
+        return {'overview': overview, 'top_patterns': top_patterns, 'recent_days': recent, 'equity_curve': equity_curve}
 
 @app.get('/calendar')
 def calendar_data(year: int = None, month: int = None):
