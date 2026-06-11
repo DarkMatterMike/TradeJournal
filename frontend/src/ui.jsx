@@ -37,7 +37,7 @@ export function PageHead({ idx, eyebrow, title, sub, actions }) {
   return (
     <div className={`page-head ${actions ? 'page-head--row' : ''}`}>
       <div style={{ flex: 1, minWidth: 260 }}>
-        <Eyebrow idx={idx} label={eyebrow} rule right="EDGE / OBSERVATORY" style={{ animation: 'rise 0.5s ease both' }} />
+        <Eyebrow idx={idx} label={eyebrow} rule right="LUXE / CAPITAL" style={{ animation: 'rise 0.5s ease both' }} />
         <h1 className="page-head__title">{title}</h1>
         {sub && <p className="page-head__sub">{sub}</p>}
       </div>

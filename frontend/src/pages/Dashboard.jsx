@@ -129,7 +129,7 @@ export default function Dashboard({ stats, days, patterns, calendarData, calView
     <>
       {/* ── HERO ─────────────────────────────────── */}
       <section className="hero">
-        <Eyebrow idx="01" label="SESSION REPORT" rule right="EDGE / OBSERVATORY" style={{ animation: 'rise 0.5s ease both' }} />
+        <Eyebrow idx="01" label="SESSION REPORT" rule right="LUXE / CAPITAL" style={{ animation: 'rise 0.5s ease both' }} />
 
         <svg className="hero__curve" viewBox="0 0 640 200" preserveAspectRatio="none">
           <defs>
@@ -174,7 +174,7 @@ export default function Dashboard({ stats, days, patterns, calendarData, calView
       {/* ── ROW: ledger + gauge ──────────────────── */}
       <div className="deck">
         <Card className="s1" idx="02" eyebrow="EXECUTION LEDGER" title="Today's Fills"
-          aux={<button className="lk" onClick={() => day?.id ? openDay(day.id) : setPage('days')}>FULL LEDGER →</button>}>
+          aux={<button className="lk" onClick={() => day?.id ? openDay(day.id) : setPage('journal')}>FULL LEDGER →</button>}>
           {trades.length > 0 ? (
             <table className="ledger">
               <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th className="r">Entry</th><th className="r">Exit</th><th className="r">Net P&L</th></tr></thead>

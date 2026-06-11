@@ -133,13 +133,12 @@ function Ghost({ word }) {
     addEventListener('mousemove', onMove);
     return () => removeEventListener('mousemove', onMove);
   }, []);
-  return <div className="ghost" ref={ref} aria-hidden="true">{word}</div>;
+  return <div className="ghost-word" ref={ref} aria-hidden="true">{word}</div>;
 }
 
 function App() {
   // ── Core state ──────────────────────────────────────
   const [page, setPage] = useState('today');
-  const [veil, setVeil] = useState(false);
   const [pageKey, setPageKey] = useState(0); // remount to replay entrance choreography
   const [days, setDays] = useState([]);
   const [stats, setStats] = useState(null);
@@ -268,20 +267,21 @@ function App() {
   const newDay = () => { setSelected(null); setBundle(null); setDraft(emptyDraft()); switchPage('detail'); setDetailTab('edit'); };
   const day = bundle?.day;
 
-  // ── Veiled page transitions (gallery lights) ────────
+  // ── Build / unbuild page transitions ────────────────
+  const [leaving, setLeaving] = useState(false);
   const switchPage = (p) => {
-    if (p === page) return;
-    setVeil(true);
+    if (p === page || leaving) return;
+    setLeaving(true);                       // the room unbuilds…
     setTimeout(() => {
       setPage(p);
-      setPageKey(k => k + 1);
+      setPageKey(k => k + 1);               // …and the next one builds
       if (p === 'journal' || p === 'today') load();
       if (p === 'today' || p === 'stats') loadStats();
       if (p === 'patterns') loadPatterns();
       if (p === 'stats') loadCalendar(calView.year, calView.month);
       window.scrollTo({ top: 0 });
-      setTimeout(() => setVeil(false), 100);
-    }, 320);
+      setLeaving(false);
+    }, 560);
   };
 
   // ghost word follows the room
@@ -307,7 +307,7 @@ function App() {
       <Dust />
       <Ghost word={ghostWords[page] || 'Luxe'} />
       <div className="vignette" aria-hidden="true" />
-      <div className={`veil ${veil ? 'on' : ''}`} aria-hidden="true" />
+
 
       <div className="lc-shell">
         <nav className="lc-top">
@@ -321,7 +321,7 @@ function App() {
           <div className="lc-date">{todayStr} · NY</div>
         </nav>
 
-        <main className="lc-main" key={pageKey}>
+        <main className={`lc-main ${leaving ? 'page-out' : ''}`} key={pageKey}>
           {page === 'today' && <TodayPage stats={stats} days={days} openDay={openDay} goPage={switchPage} />}
 
           {page === 'journal' && <JournalPage openDay={openDay} setStatus={setStatus} />}

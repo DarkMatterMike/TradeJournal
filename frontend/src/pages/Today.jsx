@@ -118,7 +118,7 @@ export default function TodayPage({ stats, days, openDay, goPage }) {
           </div>
           <div className="h">Observe the record</div>
           <p>{observation}</p>
-          <div className="sig">Luxe Intelligence</div>
+          <div className="cur-sig">Luxe Intelligence</div>
           <button className="v-btn" onClick={() => goPage('journal')}><span>View Full Session</span></button>
         </div>
       </div>

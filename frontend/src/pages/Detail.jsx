@@ -71,9 +71,9 @@ export default function DetailPage({
 
   return (
     <>
-      <button className="detail-back" onClick={() => { setPage('days'); load(); }}><ChevronLeft size={14} /> Back to days</button>
+      <button className="detail-back" onClick={() => { setPage('journal'); }}><ChevronLeft size={14} /> Back to Journal</button>
 
-      <Eyebrow idx="01" label="SESSION DETAIL" rule right="EDGE / OBSERVATORY" style={{ marginTop: 18, animation: 'rise 0.5s ease both' }} />
+      <Eyebrow idx="01" label="SESSION DETAIL" rule right="LUXE / CAPITAL" style={{ marginTop: 18, animation: 'rise 0.5s ease both' }} />
       <div className="detail-head">
         <div>
           <div className="detail-head__date">{day ? fmt(day.trade_date) : 'New Day'}</div>

@@ -69,12 +69,62 @@ body {
   100% { transform: translateY(-14vh) translateX(var(--dx)); opacity: 0; }
 }
 
+/* ── exit (unbuild) keyframes ──────────────────── */
+@keyframes wordDown { to { transform: translateY(112%); } }
+@keyframes undrawX { to { transform: scaleX(0); } }
+@keyframes retract1100 { to { stroke-dashoffset: 1100; } }
+@keyframes retract1700 { to { stroke-dashoffset: 1700; } }
+@keyframes frameOut { to { opacity: 0; transform: rotateX(-10deg) rotateY(5deg) translateY(28px); } }
+@keyframes voutDown { to { opacity: 0; transform: translateY(16px); } }
+@keyframes voutFade { to { opacity: 0; } }
+@keyframes trackOut { to { letter-spacing: 9px; opacity: 0; } }
+@keyframes pieceOut { to { opacity: 0; transform: scale(0.85); } }
+@keyframes vunfill { to { width: 0; } }
+@keyframes pgSink { to { opacity: 0; transform: translateY(10px); } }
+
+/* ── page-out: the room unbuilds ───────────────────
+   !important beats inline entrance delays so every
+   element exits on the unbuild clock, not its own. */
+:root { --e-in: cubic-bezier(0.5, 0, 0.75, 0.2); }
+
+.page-out { pointer-events: none; }
+.page-out > * { animation: pgSink 0.5s var(--e-in) 0.12s both; }
+
+.page-out .reveal .w > span { animation: wordDown 0.42s var(--e-in) both !important; }
+.page-out .genus, .page-out .over,
+.page-out .artifact__plaque, .page-out .exhibit__plaque { animation: trackOut 0.38s var(--e-in) both !important; }
+
+.page-out .sec-head .rule,
+.page-out .room__head::after,
+.page-out .figures::before, .page-out .figures::after { transform-origin: right; animation: undrawX 0.45s var(--e-in) both !important; }
+
+.page-out .artifact__frame, .page-out .exhibit { animation: frameOut 0.5s var(--e-in) both !important; }
+.page-out .artifact .eq, .page-out .artifact .eq-depth { animation: retract1100 0.55s var(--e-in) forwards !important; }
+.page-out .exhibit .eq, .page-out .exhibit .eq-depth { animation: retract1700 0.55s var(--e-in) forwards !important; }
+.page-out .runner { animation: voutFade 0.2s ease both !important; }
+.page-out .artifact__glow { animation: voutFade 0.45s ease both !important; }
+
+.page-out .stage__left > p, .page-out .stage__meta, .page-out .stage__right,
+.page-out .jrnl-filters, .page-out .jrnl-head .sub, .page-out .retro-head .sub,
+.page-out .figure, .page-out .colophon, .page-out footer.gallery,
+.page-out .room__head { animation: voutDown 0.4s var(--e-in) both !important; }
+
+.page-out .lot-row, .page-out .strip__item, .page-out .prov-row { animation: voutDown 0.34s var(--e-in) both !important; }
+.page-out .lot-row:nth-child(2n), .page-out .strip__item:nth-child(2n) { animation-delay: 0.05s !important; }
+.page-out .lot-row:nth-child(3n), .page-out .strip__item:nth-child(3n) { animation-delay: 0.09s !important; }
+.page-out .prov-row:nth-child(2n) { animation-delay: 0.06s !important; }
+
+.page-out .piece { animation: pieceOut 0.4s var(--e-in) both !important; }
+.page-out .piece:nth-child(2n) { animation-delay: 0.04s !important; }
+.page-out .piece:nth-child(3n) { animation-delay: 0.08s !important; }
+.page-out .prov-bar i { animation: vunfill 0.4s var(--e-in) both !important; }
+
 /* ── ambience ──────────────────────────────────── */
 #ocean { position: fixed; left: 0; right: 0; bottom: 0; height: 32vh; width: 100%; z-index: 0; pointer-events: none; display: block; }
 .vignette { position: fixed; inset: 0; z-index: 40; pointer-events: none; background: radial-gradient(ellipse at 50% 45%, transparent 55%, rgba(0,0,0,0.5) 100%); }
 .dust { position: fixed; inset: 0; z-index: 1; pointer-events: none; overflow: hidden; }
 .dust i { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: rgba(255,255,255,0.35); animation: dustFloat linear infinite; }
-.ghost {
+.ghost-word {
   position: fixed; left: 50%; top: 50%; z-index: 0;
   font-family: var(--serif); font-style: italic; font-weight: 300;
   font-size: clamp(180px, 30vw, 420px); color: rgba(255,255,255,0.018);
@@ -174,8 +224,8 @@ nav.lc-top { display: flex; justify-content: space-between; align-items: center;
 .thumb.u { color: var(--up); } .thumb.d { color: var(--dn); }
 .stage__right .h { font-size: 12.5px; font-weight: 600; margin-bottom: 10px; color: var(--txt); }
 .stage__right p { font-size: 12px; line-height: 1.78; color: var(--txt-2); font-weight: 300; }
-.stage__right .sig { margin-top: 12px; font-size: 11px; color: var(--txt-3); }
-.stage__right .sig::before { content: '—— '; }
+.cur-sig { margin-top: 12px; font-size: 11px; color: var(--txt-3); }
+.cur-sig::before { content: "—— "; }
 
 .v-btn {
   margin-top: 26px; width: 100%; padding: 16px;
@@ -228,7 +278,14 @@ nav.lc-top { display: flex; justify-content: space-between; align-items: center;
 .vfilter.on { color: var(--bg); background: var(--txt); border-color: var(--txt); }
 
 .room { margin-bottom: 52px; animation: vrise 0.9s var(--e-out) both; }
-.room__head { display: flex; align-items: baseline; gap: 18px; padding-bottom: 14px; position: relative; margin-bottom: 4px; flex-wrap: wrap; }
+.room__head { display: flex; align-items: baseline; gap: 18px; padding-bottom: 14px; position: relative; margin-bottom: 4px; flex-wrap: wrap; cursor: pointer; }
+.room__head:hover .room__caret { color: var(--txt); }
+.room__caret {
+  font-family: var(--serif); font-size: 20px; color: var(--txt-4); line-height: 1;
+  display: inline-block; transition: transform 0.4s var(--e-out), color 0.25s;
+  transform: rotate(0deg); align-self: center;
+}
+.room__caret.open { transform: rotate(90deg); color: var(--txt-2); }
 .room__head::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--line); transform-origin: left; animation: drawX 1.3s var(--e-out) both; }
 .room__title { font-family: var(--serif); font-weight: 400; font-size: 26px; color: var(--txt); cursor: pointer; transition: color 0.25s; }
 .room__title:hover { color: var(--up); }
@@ -404,5 +461,5 @@ footer.gallery { display: flex; justify-content: space-between; align-items: cen
   .lot-th { display: none; }
   .lot-row { grid-template-columns: 40px 1fr 80px 90px; }
   .lot-row .time, .lot-row .px { display: none; }
-  .ghost { font-size: 150px; }
+  .ghost-word { font-size: 150px; }
 }

@@ -14,11 +14,18 @@ const prodName = t => PRODUCT_NAMES[(t.product || '').toUpperCase()] || t.symbol
 export default function JournalPage({ openDay, setStatus }) {
   const [rooms, setRooms] = useState(null);
   const [filter, setFilter] = useState('all');
+  const [openRooms, setOpenRooms] = useState(() => new Set());
   const [drawer, setDrawer] = useState(null); // { trade, day }
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const load = () => api('/journal').then(setRooms).catch(e => { setRooms([]); setStatus('Journal failed: ' + e.message); });
   useEffect(() => { load(); }, []);
+
+  const toggleRoom = id => setOpenRooms(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
 
   const products = useMemo(() => {
     const s = new Set();
@@ -62,23 +69,27 @@ export default function JournalPage({ openDay, setStatus }) {
 
       {visible.map((room, ri) => {
         const count = room.shown.length;
+        const expanded = filter !== 'all' || openRooms.has(room.id);
         return (
-          <div className="room" key={room.id} style={{ animationDelay: `${0.15 + ri * 0.1}s` }}>
-            <div className="room__head" style={{ animationDelay: `${0.15 + ri * 0.1}s` }}>
-              <span className="room__title" onClick={() => openDay(room.id)} title="Open full day">{dateToWords(room.trade_date)}</span>
+          <div className="room" key={room.id} style={{ animationDelay: `${0.15 + ri * 0.08}s` }}>
+            <div className="room__head" style={{ animationDelay: `${0.15 + ri * 0.08}s` }}
+              onClick={() => count > 0 && toggleRoom(room.id)}>
+              <span className={`room__caret ${expanded ? 'open' : ''}`}>{count > 0 ? '›' : '·'}</span>
+              <span className="room__title" title="Open full day"
+                onClick={e => { e.stopPropagation(); openDay(room.id); }}>{dateToWords(room.trade_date)}</span>
               <span className="room__date">{weekdayOf(room.trade_date)} · NY Session</span>
               <span className="room__rule" />
               <span className="room__count">{count ? `${numberWord(count)} trade${count === 1 ? '' : 's'}` : 'No trades'}</span>
               <span className="room__net" style={{ color: room.pnl > 0 ? 'var(--up)' : room.pnl < 0 ? 'var(--dn)' : 'var(--txt-3)' }}>{room.pnl != null ? pnl$(room.pnl) : '—'}</span>
             </div>
 
-            {count > 0 && <>
+            {expanded && count > 0 && <>
               <div className="lot-th">
                 <span>Trade</span><span>Time</span><span>Instrument</span><span>Side</span>
                 <span className="r">Entry</span><span className="r">Exit</span><span className="r">Net</span>
               </div>
               {room.shown.map((t, i) => (
-                <div className="lot-row" key={t.id || i} style={{ animationDelay: `${0.25 + ri * 0.1 + i * 0.05}s` }}
+                <div className="lot-row" key={t.id || i} style={{ animationDelay: `${0.04 + i * 0.045}s` }}
                   onClick={() => openTrade(t, room)}>
                   <span className="lot">{roman(i + 1)}</span>
                   <span className="time">{fmtClockShort(t.entry_time)}</span>
