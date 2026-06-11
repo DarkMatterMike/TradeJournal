@@ -1478,3 +1478,44 @@ def tradovate_probe(account_id: int):
             results[f'RPT/{ep}'] = {'error': str(e)}
 
     return results
+
+
+# ── Vitrine: Journal & trade notes ────────────────────
+
+@app.get('/journal')
+def journal(limit: int = 90):
+    """Days (desc) with their trades embedded — powers the Journal page."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('SELECT * FROM trading_days ORDER BY trade_date DESC LIMIT %s', (limit,))
+        days = cur.fetchall()
+        ids = [d['id'] for d in days]
+        trades_by_day = {}
+        if ids:
+            cur.execute('SELECT id, day_id, row_data FROM trade_rows WHERE day_id = ANY(%s) ORDER BY id ASC', (ids,))
+            for r in cur.fetchall():
+                trades_by_day.setdefault(r['day_id'], []).append({'id': r['id'], **(r['row_data'] or {})})
+        out = []
+        for d in days:
+            d = dict(d)
+            d['trade_date'] = str(d['trade_date'])
+            d['trades'] = trades_by_day.get(d['id'], [])
+            out.append(d)
+        return out
+
+
+@app.patch('/trades/{row_id}')
+def update_trade_row(row_id: int, payload: dict):
+    """Update editable fields (notes, tags, setup) inside a trade row's row_data."""
+    allowed = {'notes', 'tags', 'setup'}
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute('SELECT row_data, day_id FROM trade_rows WHERE id=%s', (row_id,))
+        r = cur.fetchone()
+        if not r:
+            raise HTTPException(404, 'Trade not found')
+        rd = dict(r['row_data'] or {})
+        for k, v in payload.items():
+            if k in allowed:
+                rd[k] = v
+        cur.execute('UPDATE trade_rows SET row_data=%s WHERE id=%s', (Json(rd), row_id))
+        conn.commit()
+        return {'id': row_id, 'day_id': r['day_id'], **rd}
