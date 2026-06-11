@@ -186,7 +186,7 @@ function App() {
   return (
     <>
       {/* atmosphere */}
-      <div className="field" aria-hidden="true" />
+      <div className="ambient-field" aria-hidden="true" />
       <div className="grid-lines" aria-hidden="true" />
 
       {/* telemetry ribbon removed */}

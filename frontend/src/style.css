@@ -38,7 +38,7 @@ body {
 }
 
 /* ── ambient layers ─────────────────────────────── */
-.field {
+.ambient-field {
   position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background:
     radial-gradient(1100px 500px at 75% -10%, rgba(0,229,255,0.05), transparent 60%),
