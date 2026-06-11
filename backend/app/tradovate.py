@@ -564,10 +564,13 @@ RPT_DEMO = 'https://rpt-demo.tradovateapi.com/v1'
 
 
 def fetch_cash_history_csv(start_date: str, end_date: str,
-                            account_id: int = None, demo: bool = False) -> str:
+                            account_id: int = None, account_spec: str = None,
+                            demo: bool = False) -> str:
     """
     Call the Tradovate Reporting API for a single ≤31-day window.
     start_date / end_date: 'MM/DD/YYYY'
+    account_id: internal Tradovate ID (e.g. 845116)
+    account_spec: display account number (e.g. '1681368') — preferred by reporting API
     Returns raw CSV text.
     """
     token = _get_valid_token()
@@ -577,25 +580,34 @@ def fetch_cash_history_csv(start_date: str, end_date: str,
         {'name': 'startDate', 'value': start_date},
         {'name': 'endDate',   'value': end_date},
     ]
-    if account_id:
-        params.append({'name': 'accountId', 'value': str(account_id)})
+    # Reporting API prefers the display account number (accountSpec / name)
+    acct_val = account_spec or (str(account_id) if account_id else None)
+    if acct_val:
+        params.append({'name': 'accountId', 'value': acct_val})
 
     payload = {
         'name': 'Cash History',
         'params': params,
         'representationType': 'csv',
-        'timezone': -360,           # CT (exchange time) — matches Tradovate UI
+        'timezone': -360,
     }
 
-    resp = httpx.post(
-        f'{base}/report/getReport',
-        json=payload,
-        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
-        timeout=30,
-    )
-    logger.info(f'Cash History {start_date}→{end_date}: {resp.status_code}')
-    if not resp.is_success:
-        raise RuntimeError(f'Reporting API {resp.status_code}: {resp.text[:400]}')
+    # Try the two most likely endpoint paths
+    for path in ['getReport', 'report/getReport']:
+        resp = httpx.post(
+            f'{base}/{path}',
+            json=payload,
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            timeout=30,
+        )
+        logger.info(f'Cash History [{path}] {start_date}→{end_date}: {resp.status_code} — {resp.text[:200]}')
+        if resp.status_code == 404:
+            continue          # try next path
+        if not resp.is_success:
+            raise RuntimeError(f'Reporting API {resp.status_code}: {resp.text[:600]}')
+        return resp.text
+
+    raise RuntimeError(f'Reporting API: both endpoint paths returned 404. Base URL: {base}')
     return resp.text
 
 
@@ -617,10 +629,10 @@ def parse_cash_history_csv(csv_text: str) -> list[dict]:
 
 
 def fetch_cash_history_range(start_iso: str, end_iso: str,
-                              account_id: int = None, demo: bool = False) -> list[dict]:
+                              account_id: int = None, account_spec: str = None,
+                              demo: bool = False) -> list[dict]:
     """
     Fetch Cash History for an arbitrary date range by chunking into ≤30-day windows.
-    start_iso / end_iso: 'YYYY-MM-DD'
     """
     from datetime import date, timedelta
 
@@ -634,11 +646,12 @@ def fetch_cash_history_range(start_iso: str, end_iso: str,
     cursor = start
 
     while cursor <= end:
-        chunk_end = min(cursor + timedelta(days=29), end)   # 30-day windows max
+        chunk_end = min(cursor + timedelta(days=29), end)
         csv_text  = fetch_cash_history_csv(
             iso_to_rpt(str(cursor)),
             iso_to_rpt(str(chunk_end)),
             account_id=account_id,
+            account_spec=account_spec,
             demo=demo,
         )
         chunk_rows = parse_cash_history_csv(csv_text)
@@ -648,8 +661,9 @@ def fetch_cash_history_range(start_iso: str, end_iso: str,
     return all_rows
 
 
-def import_cash_history(account_id: int = None, start_iso: str = None,
-                         end_iso: str = None, demo: bool = False) -> dict:
+def import_cash_history(account_id: int = None, account_spec: str = None,
+                         start_iso: str = None, end_iso: str = None,
+                         demo: bool = False) -> dict:
     """
     Fetch Cash History, map rows → trade_rows, upsert into DB.
     Returns summary dict.
@@ -663,7 +677,9 @@ def import_cash_history(account_id: int = None, start_iso: str = None,
         end_iso = str(date.today())
 
     rows = fetch_cash_history_range(start_iso, end_iso,
-                                    account_id=account_id, demo=demo)
+                                    account_id=account_id,
+                                    account_spec=account_spec,
+                                    demo=demo)
 
     imported = skipped = 0
     errors: list[str] = []

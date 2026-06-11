@@ -65,10 +65,11 @@ export default function SyncPage({ onOpenDay, setStatus }) {
 
   // ── Cash History handlers ──────────────────────────────
   const cashPayload = () => ({
-    start_date: chStart,
-    end_date:   chEnd,
-    account_id: selectedAccount?.id || null,
-    demo:       chDemo,
+    start_date:   chStart,
+    end_date:     chEnd,
+    account_id:   selectedAccount?.id || null,
+    account_spec: selectedAccount?.name || selectedAccount?.accountSpec || selectedAccount?.nickname || null,
+    demo:         chDemo,
   });
 
   const runChPreview = async () => {
@@ -162,7 +163,7 @@ export default function SyncPage({ onOpenDay, setStatus }) {
       <p style={{ fontSize: 13, color: 'var(--bone-2)', marginBottom: 20, lineHeight: 1.7 }}>
         Uses the Tradovate Reporting API — the most complete source of trade P&L data.
         Fetches your full Cash History, automatically chunked into 30-day windows to avoid timeouts.
-        {selectedAccount && <strong style={{ color: 'var(--volt)' }}> Account {selectedAccount.id} selected.</strong>}
+        {selectedAccount && <strong style={{ color: 'var(--volt)' }}> Account {selectedAccount.name || selectedAccount.accountSpec || selectedAccount.id} (id: {selectedAccount.id}) selected.</strong>}
         {!selectedAccount && authorized && <span style={{ color: 'var(--gold)' }}> List Accounts above and select one first.</span>}
         {!authorized && <span style={{ color: 'var(--gold)' }}> Connect Tradovate above first.</span>}
       </p>

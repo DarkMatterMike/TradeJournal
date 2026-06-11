@@ -1538,6 +1538,7 @@ def tradovate_cash_history_preview(payload: dict):
             start_iso=payload.get('start_date'),
             end_iso=payload.get('end_date'),
             account_id=payload.get('account_id'),
+            account_spec=payload.get('account_spec'),
             demo=payload.get('demo', False),
         )
         return {'rows': rows[:200], 'total': len(rows)}
@@ -1557,6 +1558,7 @@ def tradovate_cash_history_import(payload: dict):
     try:
         result = tv.import_cash_history(
             account_id=payload.get('account_id'),
+            account_spec=payload.get('account_spec'),
             start_iso=payload.get('start_date'),
             end_iso=payload.get('end_date'),
             demo=payload.get('demo', False),
