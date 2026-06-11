@@ -594,7 +594,7 @@ def fetch_cash_history_csv(start_date: str, end_date: str,
         timeout=30,
     )
     logger.info(f'Cash History {start_date}→{end_date}: {resp.status_code}')
-    if not resp.ok:
+    if not resp.is_success:
         raise RuntimeError(f'Reporting API {resp.status_code}: {resp.text[:400]}')
     return resp.text
 
