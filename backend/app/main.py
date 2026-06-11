@@ -1519,3 +1519,66 @@ def update_trade_row(row_id: int, payload: dict):
         cur.execute('UPDATE trade_rows SET row_data=%s WHERE id=%s', (Json(rd), row_id))
         conn.commit()
         return {'id': row_id, 'day_id': r['day_id'], **rd}
+
+
+# ── Tradovate Reporting API endpoints ─────────────────────────────────
+
+@app.post('/tradovate/cash-history/preview')
+def tradovate_cash_history_preview(payload: dict):
+    """
+    Fetch raw Cash History CSV for a date range (≤31 days per chunk).
+    body: { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD",
+            "account_id": 12345, "demo": false }
+    Returns parsed rows so the UI can show a preview before importing.
+    """
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized. Connect Tradovate first.')
+    try:
+        rows = tv.fetch_cash_history_range(
+            start_iso=payload.get('start_date'),
+            end_iso=payload.get('end_date'),
+            account_id=payload.get('account_id'),
+            demo=payload.get('demo', False),
+        )
+        return {'rows': rows[:200], 'total': len(rows)}
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.post('/tradovate/cash-history/import')
+def tradovate_cash_history_import(payload: dict):
+    """
+    Fetch + import Cash History into trade_rows / trading_days.
+    body: { "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD",
+            "account_id": 12345, "demo": false }
+    """
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized. Connect Tradovate first.')
+    try:
+        result = tv.import_cash_history(
+            account_id=payload.get('account_id'),
+            start_iso=payload.get('start_date'),
+            end_iso=payload.get('end_date'),
+            demo=payload.get('demo', False),
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+
+@app.get('/tradovate/cash-history/raw-csv')
+def tradovate_cash_history_raw(start_date: str, end_date: str,
+                                account_id: int = None, demo: bool = False):
+    """
+    Dev/debug: return raw CSV text for a single ≤31-day window.
+    start_date, end_date: MM/DD/YYYY
+    """
+    if not tv._has_oauth_token():
+        raise HTTPException(401, 'Not authorized.')
+    try:
+        csv_text = tv.fetch_cash_history_csv(start_date, end_date,
+                                              account_id=account_id, demo=demo)
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(csv_text, media_type='text/csv')
+    except Exception as e:
+        raise HTTPException(502, str(e))

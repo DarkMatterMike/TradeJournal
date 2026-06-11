@@ -555,3 +555,213 @@ def _recompute(cur, day_id: int):
     if s and s['total'] > 0:
         cur.execute('UPDATE trading_days SET pnl=%s,num_trades=%s,win_count=%s,loss_count=%s,updated_at=NOW() WHERE id=%s',
                     (round(s['tp'] or 0, 2), s['total'], s['w'] or 0, s['l'] or 0, day_id))
+
+
+# ── Reporting API: Cash History ────────────────────────────────────────
+
+RPT_LIVE = 'https://rpt-live.tradovateapi.com/v1'
+RPT_DEMO = 'https://rpt-demo.tradovateapi.com/v1'
+
+
+def fetch_cash_history_csv(start_date: str, end_date: str,
+                            account_id: int = None, demo: bool = False) -> str:
+    """
+    Call the Tradovate Reporting API for a single ≤31-day window.
+    start_date / end_date: 'MM/DD/YYYY'
+    Returns raw CSV text.
+    """
+    token = _get_valid_token()
+    base  = RPT_DEMO if demo else RPT_LIVE
+
+    params = [
+        {'name': 'startDate', 'value': start_date},
+        {'name': 'endDate',   'value': end_date},
+    ]
+    if account_id:
+        params.append({'name': 'accountId', 'value': str(account_id)})
+
+    payload = {
+        'name': 'Cash History',
+        'params': params,
+        'representationType': 'csv',
+        'timezone': -360,           # CT (exchange time) — matches Tradovate UI
+    }
+
+    resp = httpx.post(
+        f'{base}/report/getReport',
+        json=payload,
+        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+        timeout=30,
+    )
+    logger.info(f'Cash History {start_date}→{end_date}: {resp.status_code}')
+    if not resp.ok:
+        raise RuntimeError(f'Reporting API {resp.status_code}: {resp.text[:400]}')
+    return resp.text
+
+
+def parse_cash_history_csv(csv_text: str) -> list[dict]:
+    """
+    Parse the Cash History CSV into a list of row dicts.
+    Normalises column names to snake_case.
+    Only returns 'Trade' rows (filters out non-trade cash events).
+    """
+    import csv, io
+    rows = []
+    reader = csv.DictReader(io.StringIO(csv_text.strip()))
+    for row in reader:
+        # normalise keys
+        norm = {k.strip().lower().replace(' ', '_').replace('/', '_'): v.strip()
+                for k, v in row.items() if k}
+        rows.append(norm)
+    return rows
+
+
+def fetch_cash_history_range(start_iso: str, end_iso: str,
+                              account_id: int = None, demo: bool = False) -> list[dict]:
+    """
+    Fetch Cash History for an arbitrary date range by chunking into ≤30-day windows.
+    start_iso / end_iso: 'YYYY-MM-DD'
+    """
+    from datetime import date, timedelta
+
+    def iso_to_rpt(s: str) -> str:
+        y, m, d = s.split('-')
+        return f'{m}/{d}/{y}'
+
+    start = date.fromisoformat(start_iso)
+    end   = date.fromisoformat(end_iso)
+    all_rows: list[dict] = []
+    cursor = start
+
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=29), end)   # 30-day windows max
+        csv_text  = fetch_cash_history_csv(
+            iso_to_rpt(str(cursor)),
+            iso_to_rpt(str(chunk_end)),
+            account_id=account_id,
+            demo=demo,
+        )
+        chunk_rows = parse_cash_history_csv(csv_text)
+        all_rows.extend(chunk_rows)
+        cursor = chunk_end + timedelta(days=1)
+
+    return all_rows
+
+
+def import_cash_history(account_id: int = None, start_iso: str = None,
+                         end_iso: str = None, demo: bool = False) -> dict:
+    """
+    Fetch Cash History, map rows → trade_rows, upsert into DB.
+    Returns summary dict.
+    """
+    from datetime import date, timedelta
+    from psycopg.types.json import Json
+
+    if not start_iso:
+        start_iso = str(date.today() - timedelta(days=90))
+    if not end_iso:
+        end_iso = str(date.today())
+
+    rows = fetch_cash_history_range(start_iso, end_iso,
+                                    account_id=account_id, demo=demo)
+
+    imported = skipped = 0
+    errors: list[str] = []
+    days_touched: set = set()
+
+    with get_conn() as conn, conn.cursor() as cur:
+        for row in rows:
+            try:
+                # key columns (names vary slightly by account — be tolerant)
+                fill_id     = row.get('fill_id') or row.get('fillid') or ''
+                trade_date_raw = (row.get('trade_date') or row.get('tradedate') or
+                                  row.get('date') or '')
+                pnl_raw     = row.get('realized_pnl') or row.get('pnl') or row.get('realized_p&l') or '0'
+                symbol      = (row.get('contract') or row.get('symbol') or '').upper()
+                side        = (row.get('buy_sell') or row.get('side') or '').upper()
+                qty_raw     = row.get('qty') or row.get('quantity') or '1'
+                entry_price = row.get('entry_price') or row.get('avg_entry') or ''
+                exit_price  = row.get('exit_price') or row.get('avg_exit') or row.get('price') or ''
+
+                if not fill_id or not trade_date_raw:
+                    skipped += 1
+                    continue
+
+                # parse date
+                td = trade_date_raw.strip()
+                # accept MM/DD/YYYY or YYYY-MM-DD
+                if '/' in td:
+                    parts = td.split('/')
+                    td = f'{parts[2]}-{parts[0].zfill(2)}-{parts[1].zfill(2)}'
+                td = td[:10]   # strip any trailing time
+
+                pnl    = float(pnl_raw.replace(',', '') or 0)
+                qty    = int(float(qty_raw or 1))
+                ep_val = float(entry_price.replace(',', '')) if entry_price else None
+                xp_val = float(exit_price.replace(',', ''))  if exit_price  else None
+
+                # derive product root (MNQ, NQ, ES, etc.)
+                product = ''
+                for root in ('MNQ', 'NQ', 'MES', 'ES', 'MYM', 'YM', 'M2K', 'RTY'):
+                    if symbol.startswith(root):
+                        product = root
+                        break
+
+                POINT_VALUES = {'MNQ': 2, 'NQ': 20, 'MES': 5, 'ES': 50,
+                                'MYM': 0.5, 'YM': 5, 'M2K': 5, 'RTY': 50}
+                gross_pnl = pnl   # reporting API already gives net in some fields
+
+                store_row = {
+                    'source': 'tradovate_rpt',
+                    'fill_id': fill_id,
+                    'trade_date': td,
+                    'symbol': symbol,
+                    'product': product,
+                    'side': 'LONG' if 'B' in side.upper() else 'SHORT' if 'S' in side.upper() else side,
+                    'qty': qty,
+                    'entry_price': ep_val,
+                    'exit_price': xp_val,
+                    'pnl': pnl,
+                    'gross_pnl': gross_pnl,
+                    'raw': row,
+                }
+
+                # deduplicate by fill_id + source
+                cur.execute("""SELECT id FROM trade_rows
+                               WHERE row_data->>'fill_id'=%s
+                                 AND row_data->>'source'='tradovate_rpt'""",
+                            (fill_id,))
+                if cur.fetchone():
+                    skipped += 1
+                    continue
+
+                # find or create trading_day
+                cur.execute("SELECT id FROM trading_days WHERE trade_date=%s", (td,))
+                dr = cur.fetchone()
+                if not dr:
+                    cur.execute(
+                        "INSERT INTO trading_days (trade_date, tickers, updated_at) VALUES (%s,%s,NOW()) RETURNING id",
+                        (td, product or symbol),
+                    )
+                    dr = cur.fetchone()
+                day_id = dr['id']
+
+                cur.execute('INSERT INTO trade_rows (day_id, row_data) VALUES (%s, %s)',
+                            (day_id, Json(store_row)))
+                days_touched.add((day_id, td))
+                imported += 1
+
+            except Exception as e:
+                errors.append(f'row fill_id={row.get("fill_id", "?")}: {e}')
+
+        for did, _ in days_touched:
+            _recompute(cur, did)
+        conn.commit()
+
+    return {
+        'imported': imported,
+        'skipped': skipped,
+        'days_updated': len(days_touched),
+        'errors': errors[:20],
+        'total_rows': len(rows),
+    }

@@ -3,6 +3,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api, API, pnlC, pnl$ } from '../api.js';
 import { Card, PageHead, Callout, Empty } from '../ui.jsx';
 
+const toIso = (d) => d.toISOString().slice(0, 10);
+const nDaysAgo = (n) => toIso(new Date(Date.now() - n * 86400000));
+
 export default function SyncPage({ onOpenDay, setStatus }) {
   const [syncStatus, setSyncStatus] = useState(null);
   const [accounts, setAccounts] = useState([]);
@@ -11,6 +14,13 @@ export default function SyncPage({ onOpenDay, setStatus }) {
   const [syncResult, setSyncResult] = useState(null);
   const [probeResult, setProbeResult] = useState(null);
   const [loading, setLoading] = useState('');
+
+  // Cash History state
+  const [chStart, setChStart] = useState(nDaysAgo(30));
+  const [chEnd, setChEnd]   = useState(toIso(new Date()));
+  const [chDemo, setChDemo] = useState(false);
+  const [chPreview, setChPreview] = useState(null);
+  const [chResult, setChResult]   = useState(null);
 
   useEffect(() => { loadStatus(); }, []);
 
@@ -65,6 +75,34 @@ export default function SyncPage({ onOpenDay, setStatus }) {
   };
 
   const authorized = syncStatus?.authorized;
+
+  const cashHistoryPayload = () => ({
+    start_date: chStart,
+    end_date:   chEnd,
+    account_id: selectedAccount?.id || null,
+    demo:       chDemo,
+  });
+
+  const runChPreview = async () => {
+    setLoading('ch-preview'); setChPreview(null); setChResult(null);
+    try {
+      const r = await api('/tradovate/cash-history/preview', { method: 'POST', body: JSON.stringify(cashHistoryPayload()) });
+      setChPreview(r);
+      setStatus(`Cash History: ${r.total} rows found`);
+    } catch (e) { setStatus('Preview failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
+
+  const runChImport = async () => {
+    if (!confirm(`Import Cash History ${chStart} → ${chEnd}? This is idempotent — safe to re-run.`)) return;
+    setLoading('ch-import'); setChResult(null);
+    try {
+      const r = await api('/tradovate/cash-history/import', { method: 'POST', body: JSON.stringify(cashHistoryPayload()) });
+      setChResult(r);
+      setStatus(`Cash History imported — ${r.imported} trades, ${r.days_updated} days updated`);
+    } catch (e) { setStatus('Import failed: ' + e.message); }
+    finally { setLoading(''); }
+  };
 
   return <>
     <PageHead
@@ -209,8 +247,145 @@ export default function SyncPage({ onOpenDay, setStatus }) {
       {syncResult.errors?.map((e, i) => <div key={i} style={{ fontSize: 12, color: 'var(--gold)', marginTop: 4 }}>{e}</div>)}
     </Card>}
 
+    <CashHistorySection
+      authorized={authorized}
+      accounts={accounts} selectedAccount={selectedAccount}
+      chStart={chStart} setChStart={setChStart}
+      chEnd={chEnd}     setChEnd={setChEnd}
+      chDemo={chDemo}   setChDemo={setChDemo}
+      chPreview={chPreview} chResult={chResult}
+      loading={loading}
+      onPreview={runChPreview} onImport={runChImport}
+    />
+
     <CsvImportSection setStatus={setStatus} />
   </>;
+}
+
+// ── Cash History Section (Reporting API) ─────────────────────────────
+function CashHistorySection({
+  authorized, accounts, selectedAccount,
+  chStart, setChStart, chEnd, setChEnd, chDemo, setChDemo,
+  chPreview, chResult, loading, onPreview, onImport,
+}) {
+  const fmtDate = iso => {
+    if (!iso) return '—';
+    const [y, m, d] = iso.split('-');
+    return `${m}/${d}/${y}`;
+  };
+
+  return (
+    <Card idx="04" eyebrow="REPORTING API" title="Cash History Import"
+      aux={<span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'var(--bone-3)', letterSpacing: '0.06em' }}>
+        TRADOVATE REPORTING API · rpt-live.tradovateapi.com
+      </span>}>
+
+      <p style={{ fontSize: 13, color: 'var(--bone-2)', marginBottom: 20, lineHeight: 1.7 }}>
+        Uses the Tradovate Reporting API to fetch your full Cash History — the most complete source of trade P&L data.
+        Requests are automatically split into 30-day windows to avoid timeouts.
+      </p>
+
+      {!authorized && (
+        <p style={{ fontSize: 12, color: 'var(--gold)', marginBottom: 14 }}>
+          ⚠ Connect Tradovate first (OAuth section above).
+        </p>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr auto auto', gap: 12, alignItems: 'end', marginBottom: 18 }}>
+        <div className="field">
+          <label className="field__label">Start Date</label>
+          <input className="field__input" type="date" value={chStart} onChange={e => setChStart(e.target.value)} />
+        </div>
+        <div className="field">
+          <label className="field__label">End Date</label>
+          <input className="field__input" type="date" value={chEnd} onChange={e => setChEnd(e.target.value)} />
+        </div>
+        <div className="field" style={{ minWidth: 110 }}>
+          <label className="field__label">Environment</label>
+          <select className="field__input" value={chDemo ? 'demo' : 'live'} onChange={e => setChDemo(e.target.value === 'demo')}>
+            <option value="live">Live</option>
+            <option value="demo">Demo</option>
+          </select>
+        </div>
+        {selectedAccount && (
+          <div className="field" style={{ minWidth: 120 }}>
+            <label className="field__label">Account</label>
+            <div style={{ fontSize: 12, color: 'var(--bone-2)', padding: '9px 12px', border: '1px solid var(--hairline)', borderRadius: 3 }}>
+              {selectedAccount.name || selectedAccount.accountSpec || selectedAccount.id}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="field-hint" style={{ marginBottom: 14 }}>
+        Range: <strong style={{ color: 'var(--bone)' }}>{fmtDate(chStart)}</strong> → <strong style={{ color: 'var(--bone)' }}>{fmtDate(chEnd)}</strong>
+        {selectedAccount ? ` · Account ${selectedAccount.id}` : ' · All accounts'}
+        {' · Chunks into 30-day windows automatically'}
+      </div>
+
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+        <button className="btn ghost" onClick={onPreview} disabled={!authorized || !!loading}>
+          {loading === 'ch-preview' ? <span className="spin" /> : null} PREVIEW
+        </button>
+        <button className="btn primary" onClick={onImport} disabled={!authorized || !!loading}>
+          {loading === 'ch-import' ? <span className="spin" /> : null} IMPORT
+        </button>
+      </div>
+
+      {chPreview && (
+        <div style={{ marginTop: 20 }}>
+          <div className="callouts" style={{ border: 'none', padding: 0, marginBottom: 14 }}>
+            <Callout k="ROWS FOUND" v={String(chPreview.total)} />
+            <Callout k="SHOWING" v={`${Math.min(chPreview.rows?.length ?? 0, 200)} of ${chPreview.total}`} />
+          </div>
+          {chPreview.rows?.length > 0 && (
+            <div className="trade-table-wrap">
+              <table className="ledger">
+                <thead><tr>
+                  {Object.keys(chPreview.rows[0]).slice(0, 10).map(k => (
+                    <th key={k}>{k.replace(/_/g, ' ').toUpperCase()}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {chPreview.rows.slice(0, 50).map((r, i) => (
+                    <tr key={i}>
+                      {Object.values(r).slice(0, 10).map((v, j) => (
+                        <td key={j} className="mono" style={{ fontSize: 11 }}>{String(v ?? '—')}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {chPreview.total > 0 && (
+            <div style={{ marginTop: 14 }}>
+              <button className="btn primary" onClick={onImport} disabled={!!loading}>
+                {loading === 'ch-import' ? <span className="spin" /> : null}
+                IMPORT THESE {chPreview.total} ROWS
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {chResult && (
+        <div style={{ marginTop: 16 }}>
+          <div className="callouts" style={{ border: 'none', padding: 0 }}>
+            <Callout k="IMPORTED" v={String(chResult.imported)} vColor="var(--up)" />
+            <Callout k="SKIPPED" v={String(chResult.skipped ?? 0)} />
+            <Callout k="DAYS UPDATED" v={String(chResult.days_updated)} />
+            <Callout k="TOTAL ROWS" v={String(chResult.total_rows ?? 0)} />
+            <Callout k="ERRORS" v={String(chResult.errors?.length || 0)}
+              vColor={chResult.errors?.length ? 'var(--dn)' : undefined} />
+          </div>
+          {chResult.errors?.map((e, i) => (
+            <div key={i} style={{ fontSize: 12, color: 'var(--gold)', marginTop: 4 }}>{e}</div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
 }
 
 // ── CSV Import Section ────────────────────────────────────────────────
